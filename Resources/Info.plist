@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>ArchiveCat</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.frankruan.ArchiveCat</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>ArchiveCat</string>
+	<key>CFBundleDisplayName</key>
+	<string>ArchiveCat</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>ArchiveCat — a little cat that climbs inside archives and looks around without making a mess.</string>
+
+	<!--
+	  Document registration.
+
+	  Detection is libarchive's job, not the extension's, so this list exists to
+	  make Finder offer ArchiveCat and to populate the Open panel filter. It
+	  deliberately does not claim public.data or public.item: ArchiveCat is not
+	  a candidate for every file on the Mac.
+
+	  LSHandlerRank is Alternate on purpose. macOS ships Archive Utility as the
+	  default for most archive types, and hijacking that would be rude; users who
+	  want ArchiveCat to own a type can say so in Get Info. This registration is
+	  what makes "Open With > ArchiveCat" work everywhere.
+	-->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Archive</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>NSDocumentClass</key>
+			<string>ArchiveCat.ArchiveDocumentFile</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.archive</string>
+				<string>public.zip-archive</string>
+				<string>com.pkware.zip-archive</string>
+				<string>org.gnu.gnu-zip-archive</string>
+				<string>org.gnu.gnu-zip-tar-archive</string>
+				<string>public.tar-archive</string>
+				<string>public.bzip2-archive</string>
+				<string>org.tukaani.xz-archive</string>
+				<string>public.cpio-archive</string>
+				<string>com.apple.xar-archive</string>
+				<string>org.7-zip.7-zip-archive</string>
+				<string>com.rarlab.rar-archive</string>
+				<string>public.iso-image</string>
+				<string>com.apple.disk-image</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

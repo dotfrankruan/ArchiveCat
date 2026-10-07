@@ -97,6 +97,7 @@ let package = Package(
     ],
     products: [
         .library(name: "ArchiveCore", targets: ["ArchiveCore"]),
+        .executable(name: "ArchiveCat", targets: ["ArchiveCat"]),
     ],
     targets: [
         // ---------------------------------------------------------------------
@@ -118,6 +119,29 @@ let package = Package(
             path: "Sources/ArchiveCore",
             cSettings: libarchiveCSettings,
             swiftSettings: libarchiveSwiftSettings
+        ),
+
+        // ---------------------------------------------------------------------
+        // The application.
+        // ---------------------------------------------------------------------
+        .executableTarget(
+            name: "ArchiveCat",
+            dependencies: ["ArchiveCore"],
+            path: "Sources/ArchiveCat",
+            swiftSettings: libarchiveSwiftSettings + [
+                // SwiftUI lives in the app target; keep the strictest useful
+                // concurrency checking on the engine, relax it a touch for
+                // AppKit delegate plumbing which is main-actor by convention.
+                .unsafeFlags(["-strict-concurrency=complete"]),
+            ],
+            linkerSettings: [
+                // Allow a bundled copy of libarchive to be found when the app is
+                // shipped inside a .app bundle (see Scripts/build-app.sh).
+                .unsafeFlags([
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "@executable_path/../Frameworks",
+                ]),
+            ]
         ),
 
         // ---------------------------------------------------------------------

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  ArchiveCat is designed for App Sandbox from the start.
+
+	  Entitlements, and why each one is here:
+
+	  * app-sandbox
+	      Read-only browsing of archives the user picked. Archives are untrusted
+	      input, so the app is confined to what the user explicitly handed it.
+
+	  * files.user-selected.read-write
+	      Both halves are needed. Read, because opening an archive from the Open
+	      panel or Finder is how a document starts. Write, because extracting to
+	      a folder the user chose is a core feature.
+
+	  * files.downloads.read-write
+	      "Extract to Downloads" must work without an Open panel. This is the
+	      narrowest entitlement that allows it; no other well-known folder is
+	      claimed.
+
+	  * files.bookmarks.app-scope
+	      Recent Documents reopens archives after a relaunch, and the sandbox
+	      only restores access through a security-scoped bookmark. ArchiveCat
+	      grows the bookmark in `ArchiveDocumentFile` and releases it when the
+	      document closes.
+
+	  There is deliberately no network entitlement: an archive browser has no
+	  business talking to the network.
+	-->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
+	<key>com.apple.security.files.downloads.read-write</key>
+	<true/>
+	<key>com.apple.security.files.bookmarks.app-scope</key>
+	<true/>
+</dict>
+</plist>
