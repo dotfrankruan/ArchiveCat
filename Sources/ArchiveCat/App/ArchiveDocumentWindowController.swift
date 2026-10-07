@@ -37,7 +37,6 @@ final class ArchiveDocumentWindowController: NSWindowController {
 
     private var searchField: NSSearchField?
     private var backForwardControl: NSSegmentedControl?
-    private var inspectorItem: NSToolbarItem?
     private var observationTask: Task<Void, Never>?
 
     init(document: ArchiveDocumentFile) {
@@ -113,7 +112,6 @@ final class ArchiveDocumentWindowController: NSWindowController {
             window.isDocumentEdited = false
             backForwardControl?.setEnabled(model.canGoBack, forSegment: 0)
             backForwardControl?.setEnabled(model.canGoForward, forSegment: 1)
-            inspectorItem?.isEnabled = model.document != nil
         } onChange: { [weak self] in
             Task { @MainActor in
                 self?.observeModel()
@@ -126,7 +124,6 @@ final class ArchiveDocumentWindowController: NSWindowController {
     private static let searchItem = NSToolbarItem.Identifier("ArchiveCat.search")
     private static let navigationItem = NSToolbarItem.Identifier("ArchiveCat.navigation")
     private static let quickLookItem = NSToolbarItem.Identifier("ArchiveCat.quickLook")
-    private static let inspectorItemID = NSToolbarItem.Identifier("ArchiveCat.inspector")
     private static let extractItem = NSToolbarItem.Identifier("ArchiveCat.extract")
 
     private func configureToolbar() {
@@ -167,7 +164,6 @@ final class ArchiveDocumentWindowController: NSWindowController {
         model.searchText = sender.stringValue
     }
     @objc private func quickLookClicked(_ sender: Any?) { model.quickLook() }
-    @objc private func inspectorClicked(_ sender: Any?) { model.showsInspector.toggle() }
     @objc private func extractClicked(_ sender: Any?) {
         ExtractionCoordinator.extractSelection(from: model, window: window)
     }
@@ -178,14 +174,21 @@ final class ArchiveDocumentWindowController: NSWindowController {
 extension ArchiveDocumentWindowController: NSToolbarDelegate {
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        // Deliberately no sidebar or inspector item: SwiftUI's
+        // `NavigationSplitView` and `.inspector` already draw their own toggles
+        // exactly where macOS puts them, and adding ours alongside showed two
+        // identical buttons for each. ⌘I and Entry ▸ Show Info still reach the
+        // inspector through the model, and ⌃⌘S toggles the sidebar.
+        //
+        // QL, Extract and Inspector items are marked navigational, which puts
+        // them in the leading group next to back/forward, leaving the search
+        // field at the trailing edge — the Finder's arrangement.
         [
-            .toggleSidebar,
             Self.navigationItem,
             .flexibleSpace,
-            Self.searchItem,
             Self.quickLookItem,
             Self.extractItem,
-            Self.inspectorItemID,
+            Self.searchItem,
         ]
     }
 
@@ -266,18 +269,6 @@ extension ArchiveDocumentWindowController: NSToolbarDelegate {
             item.target = self
             item.action = #selector(extractClicked(_:))
             item.isNavigational = true
-            return item
-
-        case Self.inspectorItemID:
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "Inspector"
-            item.paletteLabel = "Inspector"
-            item.toolTip = "Show technical information about the selection (⌘I)"
-            item.image = NSImage(systemSymbolName: "sidebar.right", accessibilityDescription: "Inspector")
-            item.target = self
-            item.action = #selector(inspectorClicked(_:))
-            item.isNavigational = true
-            inspectorItem = item
             return item
 
         default:
