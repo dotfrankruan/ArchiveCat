@@ -1,0 +1,28 @@
+# --- macOS ---
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# --- Xcode / SwiftPM build products ---
+.build/
+.swiftpm/
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+Package.resolved
+
+# --- Assembled application bundles ---
+dist/
+*.app/
+*.dSYM/
+
+# --- Test scratch ---
+/tmp-fixtures/
+Tests/ArchiveCoreTests/Fixtures/generated/
+
+# --- Editors ---
+.idea/
+.vscode/
+*.swp

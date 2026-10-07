@@ -1,0 +1,8 @@
+// Re-exports libarchive as the `CArchive` module.
+//
+// Deliberately marked [system] so that third-party header warnings do not
+// pollute ArchiveCat's build output.
+module CArchive [system] {
+    header "shim.h"
+    export *
+}
