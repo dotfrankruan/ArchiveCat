@@ -10,10 +10,16 @@ import Foundation
 
 // MARK: - Options
 
-/// How to behave when the destination already contains a file.
+/// The answer to use for a collision when nobody is going to ask the user.
+///
+/// Extraction normally asks: `ExtractionOptions.conflictResolver` describes the
+/// collision and the UI answers with an `ExtractionConflictResolution`. A policy
+/// is only the pre-decided answer, used when no resolver is installed.
 public enum ExtractionConflictPolicy: String, Sendable, CaseIterable, Codable {
-    /// The caller must resolve conflicts before starting. The service treats it
-    /// as `.replace` if it somehow reaches extraction, and logs the fact.
+    /// Defer to `ExtractionOptions.conflictResolver`.
+    ///
+    /// With no resolver installed this behaves as `.keepBoth`: the engine would
+    /// rather write a second copy than destroy something on a guess.
     case ask
     /// Overwrite the existing file. Only ever selected by an explicit user
     /// choice: nothing in ArchiveCat overwrites silently.
@@ -72,8 +78,16 @@ public struct ExtractionLimits: Sendable, Hashable {
 
 /// Everything the extraction service needs.
 public struct ExtractionOptions: Sendable {
-    /// Conflict behaviour. Resolved by the UI before extraction starts.
+    /// The pre-decided answer for a collision, used when `conflictResolver` is
+    /// `nil`. Defaults to `.ask`, which with no resolver means "keep both" —
+    /// the engine will not invent a destructive default.
     public var conflictPolicy: ExtractionConflictPolicy
+    /// Asked once per collision while extraction runs.
+    ///
+    /// This is how the UI puts "Replace / Skip / Keep Both / Cancel" to the
+    /// user: the resolver suspends until they answer, and the engine executes
+    /// exactly what comes back. ArchiveCore knows nothing about AppKit.
+    public var conflictResolver: ExtractionConflictResolver?
     /// Apply the archive's permission bits to extracted files.
     public var preservePermissions: Bool
     /// Apply the archive's modification dates, directories last.
@@ -92,7 +106,8 @@ public struct ExtractionOptions: Sendable {
     public var extractSpecialFiles: Bool
 
     public init(
-        conflictPolicy: ExtractionConflictPolicy = .replace,
+        conflictPolicy: ExtractionConflictPolicy = .ask,
+        conflictResolver: ExtractionConflictResolver? = nil,
         preservePermissions: Bool = true,
         preserveModificationDates: Bool = true,
         stripSetuidAndSetgid: Bool = true,
@@ -102,6 +117,7 @@ public struct ExtractionOptions: Sendable {
         extractSpecialFiles: Bool = false
     ) {
         self.conflictPolicy = conflictPolicy
+        self.conflictResolver = conflictResolver
         self.preservePermissions = preservePermissions
         self.preserveModificationDates = preserveModificationDates
         self.stripSetuidAndSetgid = stripSetuidAndSetgid
@@ -214,17 +230,15 @@ public struct ExtractionReport: Sendable {
 // MARK: - Preflight
 
 /// An entry whose destination already exists.
-public struct ExtractionConflict: Sendable, Identifiable {
-    public let entry: ArchiveEntry
-    public let existingURL: URL
-
-    public var id: ArchiveEntryID { entry.id }
-}
-
-/// Read-only checks that run *before* anything is written, so the UI can put a
-/// real question to the user instead of discovering conflicts midway.
+/// Read-only checks that can run *before* anything is written.
+///
+/// Extraction itself does not depend on a preflight: it asks
+/// `ExtractionOptions.conflictResolver` the moment it meets a collision, which
+/// is the only way to be sure the answer still applies (the destination can
+/// change between a preflight and the write). This remains useful for callers
+/// that want to warn about a large number of collisions up front.
 public enum ExtractionPreflight {
-    /// Existing files that the extraction would collide with.
+    /// Existing items that the extraction would collide with.
     public static func conflicts(
         entries: [ArchiveEntry],
         in destination: URL,
@@ -236,9 +250,16 @@ public enum ExtractionPreflight {
         for entry in entries where entry.safety.isSafe {
             guard let relative = relativePath(for: entry, options: options) else { continue }
             let url = destination.appendingPathComponent(relative)
-            if fileManager.fileExists(atPath: url.path(percentEncoded: false)) {
-                conflicts.append(ExtractionConflict(entry: entry, existingURL: url))
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: url.path(percentEncoded: false), isDirectory: &isDirectory) else {
+                continue
             }
+            conflicts.append(ExtractionConflict(
+                entry: entry,
+                relativePath: relative,
+                destination: destination,
+                existingIsDirectory: isDirectory.boolValue
+            ))
         }
         return conflicts
     }

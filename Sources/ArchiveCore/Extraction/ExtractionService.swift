@@ -28,19 +28,26 @@ public struct ExtractionService: Sendable {
 
     /// Extracts `entries` from the archive at `archiveURL` into `destination`.
     ///
-    /// - Blocking: run this from a background task. The engine never calls it
-    ///   on the main thread.
     /// - Parameter progress: called once per completed entry.
+    /// - Parameter options: `conflictResolver` is asked about every collision
+    ///   and its answer is executed as given; `conflictPolicy` is only the
+    ///   pre-decided fallback when no resolver is installed.
     /// - Returns: a report describing what was written, skipped and failed.
-    ///   A cancelled operation returns a report with `wasCancelled == true`
-    ///   rather than throwing, so partial results are not lost.
+    ///   A cancelled operation — including one stopped by the user choosing
+    ///   "Cancel" in a conflict prompt — returns a report with
+    ///   `wasCancelled == true` rather than throwing, so partial results are
+    ///   not lost and the caller can describe them.
+    ///
+    /// Asynchronous because a conflict prompt suspends until the user answers.
+    /// The actual I/O still runs on whatever task calls this, off the main
+    /// thread; nothing here touches AppKit.
     public func extract(
         archiveURL: URL,
         entries: [ArchiveEntry],
         to destination: URL,
         options: ExtractionOptions = .default,
         progress: (@Sendable (ExtractionProgress) -> Void)? = nil
-    ) throws -> ExtractionReport {
+    ) async throws -> ExtractionReport {
         let started = Date()
         var report = ExtractionReport(destination: destination)
 
@@ -120,6 +127,43 @@ public struct ExtractionService: Sendable {
             do {
                 try enforce(limits: options.limits, entry: entry, soFar: bytesWritten, completed: completedEntries)
 
+                // Ask about a collision *before* writing anything, and do what
+                // the answer says. A folder is not a conflict: creating one that
+                // already exists is a no-op rather than a decision.
+                var action = ConflictAction(policy: options.conflictPolicy)
+                if entry.type != .directory {
+                    switch await conflictOutcome(
+                        entry: entry,
+                        relativePath: relativePath,
+                        destination: destination,
+                        secure: secure,
+                        options: options
+                    ) {
+                    case .cancelOperation:
+                        cancelled = true
+                        break extractionLoop
+
+                    case .skipExisting:
+                        report.skipped.append(.init(
+                            entry: entry,
+                            destination: destination.appendingPathComponent(relativePath),
+                            reason: .alreadyExists
+                        ))
+                        try stream.skipCurrentEntryData()
+                        completedEntries += 1
+                        progress?(ExtractionProgress(
+                            completedEntries: completedEntries,
+                            totalEntries: selectedOrdinals.count,
+                            bytesWritten: bytesWritten,
+                            currentPath: entry.path
+                        ))
+                        continue
+
+                    case let .proceed(resolved):
+                        action = resolved
+                    }
+                }
+
                 switch entry.type {
                 case .directory:
                     let parentRelative = ArchivePath.parent(of: relativePath) ?? ""
@@ -139,6 +183,7 @@ public struct ExtractionService: Sendable {
                     if let result = try writeFile(
                         entry: entry,
                         relativePath: relativePath,
+                        action: action,
                         stream: stream,
                         secure: secure,
                         options: options,
@@ -225,21 +270,36 @@ public struct ExtractionService: Sendable {
         // Links come last, after every regular file exists, so a symlink can
         // never be used as a traversal vector for a later write.
         if !cancelled {
-            createPendingSymlinks(pendingSymlinks, secure: secure, destination: destination, options: options, report: &report)
-            createPendingHardlinks(
-                pendingHardlinks,
+            var linksCompleted = await createPendingSymlinks(
+                pendingSymlinks,
                 secure: secure,
                 destination: destination,
                 options: options,
-                extractedRelativePaths: extractedRelativePaths,
                 report: &report
             )
-            applyDeferredMetadata(
-                directories: pendingDirectoryMetadata,
-                files: pendingFileMetadata,
-                secure: secure,
-                options: options
-            )
+            if linksCompleted {
+                linksCompleted = await createPendingHardlinks(
+                    pendingHardlinks,
+                    secure: secure,
+                    destination: destination,
+                    options: options,
+                    extractedRelativePaths: extractedRelativePaths,
+                    report: &report
+                )
+            }
+
+            if linksCompleted {
+                applyDeferredMetadata(
+                    directories: pendingDirectoryMetadata,
+                    files: pendingFileMetadata,
+                    secure: secure,
+                    options: options
+                )
+            } else {
+                // The user cancelled from a link's conflict prompt. What is
+                // already on disk stays; the report says so.
+                cancelled = true
+            }
         }
 
         report.totalBytesWritten = bytesWritten
@@ -259,6 +319,7 @@ public struct ExtractionService: Sendable {
     private func writeFile(
         entry: ArchiveEntry,
         relativePath: String,
+        action: ConflictAction,
         stream: LibArchiveReadStream,
         secure: SecureDestination,
         options: ExtractionOptions,
@@ -282,7 +343,7 @@ public struct ExtractionService: Sendable {
             try secure.createDirectory(relativePath: parent)
         }
 
-        guard let created = try secure.createFile(relativePath: relativePath, mode: mode, policy: options.conflictPolicy) else {
+        guard let created = try secure.createFile(relativePath: relativePath, mode: mode, action: action) else {
             report.skipped.append(.init(entry: entry, destination: nil, reason: .alreadyExists))
             try stream.skipCurrentEntryData()
             return nil
@@ -332,6 +393,110 @@ public struct ExtractionService: Sendable {
         }
     }
 
+    // MARK: - Conflict decisions
+
+    /// What should happen to one entry, given what already exists.
+    private enum EntryConflictOutcome {
+        /// Write it, using this action.
+        case proceed(ConflictAction)
+        /// Leave the existing item alone; do not write this entry.
+        case skipExisting
+        /// Stop the whole extraction.
+        case cancelOperation
+    }
+
+    /// Describes a collision to `options.conflictResolver` and turns the answer
+    /// into a concrete action.
+    ///
+    /// Everything the user is not asked about is deliberate:
+    /// * no existing item — nothing to decide;
+    /// * a *folder* at the target path — "Replace" would mean deleting a folder,
+    ///   which ArchiveCat does not do, so the writer is left to refuse it and
+    ///   say so rather than offering a choice that cannot be honoured;
+    /// * no resolver installed — fall back to the configured policy.
+    private func conflictOutcome(
+        entry: ArchiveEntry,
+        relativePath: String,
+        destination: URL,
+        secure: SecureDestination,
+        options: ExtractionOptions
+    ) async -> EntryConflictOutcome {
+        guard secure.exists(relativePath: relativePath) else {
+            // Nothing there: write it, whatever a policy would have said.
+            return .proceed(.replace)
+        }
+
+        let existingIsDirectory = (try? secure.isDirectory(relativePath: relativePath)) ?? false
+        guard !existingIsDirectory, let resolver = options.conflictResolver else {
+            return .proceed(ConflictAction(policy: options.conflictPolicy))
+        }
+
+        let conflict = ExtractionConflict(
+            entry: entry,
+            relativePath: relativePath,
+            destination: destination,
+            existingIsDirectory: false
+        )
+
+        switch await resolver(conflict) {
+        case .replace: return .proceed(.replace)
+        case .skip: return .skipExisting
+        case .keepBoth: return .proceed(.keepBoth)
+        case .cancel:
+            ArchiveCatLog.extraction.notice("extraction cancelled at a conflict prompt")
+            return .cancelOperation
+        }
+    }
+
+    /// The same decision, for a link that is created in the post-pass.
+    ///
+    /// - Returns: the path to create the link at, and whether the user asked to
+    ///   cancel the whole operation.
+    private func linkDestination(
+        entry: ArchiveEntry,
+        relativePath: String,
+        destination: URL,
+        secure: SecureDestination,
+        options: ExtractionOptions
+    ) async throws -> (path: String?, cancelled: Bool) {
+        guard secure.exists(relativePath: relativePath) else {
+            return (relativePath, false)
+        }
+
+        let existingIsDirectory = (try? secure.isDirectory(relativePath: relativePath)) ?? false
+        var action = ConflictAction(policy: options.conflictPolicy)
+
+        if !existingIsDirectory, let resolver = options.conflictResolver {
+            let conflict = ExtractionConflict(
+                entry: entry,
+                relativePath: relativePath,
+                destination: destination,
+                existingIsDirectory: false
+            )
+            switch await resolver(conflict) {
+            case .replace: action = .replace
+            case .skip: return (nil, false)
+            case .keepBoth: action = .keepBoth
+            case .cancel: return (nil, true)
+            }
+        }
+
+        switch action {
+        case .skip:
+            return (nil, false)
+        case .keepBoth:
+            return (try secure.uniqueRelativePath(for: relativePath), false)
+        case .replace:
+            // Never delete a folder, and never write through a symlink: replace
+            // means "remove the file that is in the way, then create ours".
+            if existingIsDirectory {
+                throw POSIXFailure(operation: "replace directory with link", errorNumber: EISDIR, relativePath: relativePath)
+            }
+            try secure.removeFile(relativePath: relativePath)
+            return (relativePath, false)
+        }
+    }
+
     // MARK: - Links
 
     private func ensureParentDirectory(of relativePath: String, secure: SecureDestination) throws {
@@ -340,13 +505,14 @@ public struct ExtractionService: Sendable {
         try secure.createDirectory(relativePath: parent)
     }
 
+    /// - Returns: `false` when the user cancelled from a conflict prompt.
     private func createPendingSymlinks(
         _ pending: [(entry: ArchiveEntry, relativePath: String, target: String)],
         secure: SecureDestination,
         destination: URL,
         options: ExtractionOptions,
         report: inout ExtractionReport
-    ) {
+    ) async -> Bool {
         for item in pending.sorted(by: { ArchivePath.depth(of: $0.relativePath) < ArchivePath.depth(of: $1.relativePath) }) {
             switch ArchivePath.resolveSymlinkTarget(item.target, linkPath: item.entry.path) {
             case let .escapesRoot(violation):
@@ -361,7 +527,15 @@ public struct ExtractionService: Sendable {
 
             case .insideRoot:
                 do {
-                    guard let finalPath = try resolveLinkPath(item.relativePath, secure: secure, options: options) else {
+                    let decision = try await linkDestination(
+                        entry: item.entry,
+                        relativePath: item.relativePath,
+                        destination: destination,
+                        secure: secure,
+                        options: options
+                    )
+                    if decision.cancelled { return false }
+                    guard let finalPath = decision.path else {
                         report.skipped.append(.init(entry: item.entry, destination: nil, reason: .alreadyExists))
                         continue
                     }
@@ -394,8 +568,10 @@ public struct ExtractionService: Sendable {
                 }
             }
         }
+        return true
     }
 
+    /// - Returns: `false` when the user cancelled from a conflict prompt.
     private func createPendingHardlinks(
         _ pending: [(entry: ArchiveEntry, relativePath: String, target: String)],
         secure: SecureDestination,
@@ -403,7 +579,7 @@ public struct ExtractionService: Sendable {
         options: ExtractionOptions,
         extractedRelativePaths: Set<String>,
         report: inout ExtractionReport
-    ) {
+    ) async -> Bool {
         for item in pending {
             let normalizedTarget = ArchivePath.normalize(rawPath: item.target)
 
@@ -440,7 +616,15 @@ public struct ExtractionService: Sendable {
             }
 
             do {
-                guard let finalPath = try resolveLinkPath(item.relativePath, secure: secure, options: options) else {
+                let decision = try await linkDestination(
+                    entry: item.entry,
+                    relativePath: item.relativePath,
+                    destination: destination,
+                    secure: secure,
+                    options: options
+                )
+                if decision.cancelled { return false }
+                guard let finalPath = decision.path else {
                     report.skipped.append(.init(entry: item.entry, destination: nil, reason: .alreadyExists))
                     continue
                 }
@@ -472,33 +656,7 @@ public struct ExtractionService: Sendable {
                 ))
             }
         }
-    }
-
-    /// Applies the conflict policy for a link destination.
-    ///
-    /// - Returns: the relative path to use, or `nil` when the entry should be
-    ///   skipped because something already lives there.
-    private func resolveLinkPath(
-        _ relativePath: String,
-        secure: SecureDestination,
-        options: ExtractionOptions
-    ) throws -> String? {
-        guard secure.exists(relativePath: relativePath) else { return relativePath }
-
-        switch options.conflictPolicy {
-        case .skip:
-            return nil
-        case .ask, .replace:
-            // Never replace a directory; replacing a file or symlink here is an
-            // explicit "Replace" choice by the user.
-            if try secure.isDirectory(relativePath: relativePath) {
-                throw POSIXFailure(operation: "replace directory with link", errorNumber: EISDIR, relativePath: relativePath)
-            }
-            try secure.removeFile(relativePath: relativePath)
-            return relativePath
-        case .keepBoth:
-            return try secure.uniqueRelativePath(for: relativePath)
-        }
+        return true
     }
 
     // MARK: - Deferred metadata

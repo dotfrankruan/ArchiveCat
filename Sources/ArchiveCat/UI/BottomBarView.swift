@@ -124,7 +124,9 @@ struct BottomBarView: View {
                 .controlSize(.small)
                 .progressViewStyle(.circular)
 
-            if let progress = model.extraction.progress {
+            if model.extraction.awaitingDecision {
+                Text("Waiting for your decision…")
+            } else if let progress = model.extraction.progress {
                 Text("\(progress.completedEntries.formatted()) of \(progress.totalEntries.formatted())")
                 Text("•").foregroundStyle(.tertiary)
                 Text(ArchiveCatFormat.byteCount(progress.bytesWritten))

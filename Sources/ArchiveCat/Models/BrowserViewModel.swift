@@ -34,6 +34,9 @@ final class BrowserViewModel {
         var completedSummary: String?
         /// Where "Show in Finder" should go after a finished extraction.
         var revealURL: URL?
+        /// True while a conflict sheet is up and the engine is waiting for the
+        /// user, so the progress strip can say so instead of looking stuck.
+        var awaitingDecision = false
     }
 
     // MARK: - Identity
@@ -400,6 +403,7 @@ final class BrowserViewModel {
                 self.finishExtraction(report)
             } catch {
                 self.extraction.isRunning = false
+                self.extraction.awaitingDecision = false
                 if (error as? ArchiveError)?.isCancellation == true {
                     self.setStatus("Extraction cancelled.")
                     return
@@ -412,6 +416,7 @@ final class BrowserViewModel {
     private func finishExtraction(_ report: ExtractionReport) {
         extraction.isRunning = false
         extraction.progress = nil
+        extraction.awaitingDecision = false
 
         var parts: [String] = []
         if report.extractedCount > 0 {
@@ -423,7 +428,12 @@ final class BrowserViewModel {
         if !report.failures.isEmpty {
             parts.append("\(report.failures.count.formatted()) failed")
         }
-        let summary = parts.isEmpty ? "Nothing was extracted." : parts.joined(separator: ", ") + "."
+        var summary = parts.isEmpty ? "Nothing was extracted." : parts.joined(separator: ", ") + "."
+        if report.wasCancelled {
+            // Cancelling from a conflict prompt leaves whatever was already
+            // written on disk, which the counts above describe.
+            summary = "Cancelled. " + summary
+        }
         extraction.completedSummary = summary
         // Reveal the item itself when there is exactly one, so the Finder
         // highlights what the user asked for rather than its parent folder.

@@ -134,7 +134,7 @@ public actor PreviewMaterializer {
             try FileManager.default.createDirectory(at: payloadDirectory, withIntermediateDirectories: true)
 
             do {
-                let report = try service.extract(
+                let report = try await service.extract(
                     archiveURL: document.url,
                     entries: [entry],
                     to: payloadDirectory,
@@ -209,7 +209,7 @@ public actor PreviewMaterializer {
             try? FileManager.default.removeItem(at: directory)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
-            let report = try service.extract(
+            let report = try await service.extract(
                 archiveURL: document.url,
                 entries: entries,
                 to: directory,

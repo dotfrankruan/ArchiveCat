@@ -160,7 +160,9 @@ public actor ArchiveSession: ArchiveReading {
 
         return try await Task.detached(priority: .userInitiated) {
             do {
-                return try service.extract(
+                // Off the main thread, but asynchronous: a conflict prompt
+                // suspends inside here until the user answers.
+                return try await service.extract(
                     archiveURL: archiveURL,
                     entries: expanded,
                     to: destination,

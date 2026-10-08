@@ -201,10 +201,11 @@ particular there is no network entitlement.
 ## Testing
 
 ```sh
-make test
+make test                        # engine suite
+Scripts/verify-lifecycle.sh      # document lifecycle smoke test (needs a built app)
 ```
 
-84 tests cover path safety, virtual tree construction (implicit directories,
+94 tests cover path safety, virtual tree construction (implicit directories,
 duplicate paths, unicode names, deep nesting, hostile paths), metadata
 enumeration across eight container formats, extraction (traversal, symlink
 escapes, conflicts, permissions, dates, hard links, limits), preview caching and
@@ -217,6 +218,19 @@ suite can create archives no command-line tool would produce (`../../escape`,
 a symlink to `/etc`, 300-byte file names) and needs no checked-in binaries. The
 writer lives in the test target on purpose: it keeps ArchiveCat's read-only
 promise structural.
+
+Extraction conflicts are covered by engine tests for all four answers
+(Replace, Skip, Keep Both, Cancel), including cancellation leaving the engine
+usable afterwards, folder collisions never being offered as "Replace", and the
+resolver being asked exactly once per collision. The conflict *sheet* itself is
+exercised by hand, for the same TCC reason the lifecycle smoke test notes.
+
+The document lifecycle smoke test (`Scripts/verify-lifecycle.sh`) drives the
+real built application through launching empty, opening two archives as two
+document windows, reusing a reopened document, staying alive with no windows,
+and quitting cleanly. The one thing it cannot do is click ⌘W — macOS denies
+synthetic GUI input to scripts — so closing the last document and watching the
+welcome window return is verified manually.
 
 ---
 

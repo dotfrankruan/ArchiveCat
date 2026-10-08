@@ -124,12 +124,14 @@ final class SecureDestination {
     /// - Parameters:
     ///   - relativePath: destination-relative path; must already be validated.
     ///   - mode: permission bits to create with.
-    ///   - policy: how to treat an existing entry.
-    /// - Returns: `nil` when the policy was `.skip` and the file already existed.
+    ///   - action: what to do about something already living at that path. The
+    ///     decision is made by the caller (see `ExtractionConflictResolver`);
+    ///     this function only executes it.
+    /// - Returns: `nil` when the action was `.skip` and the file already existed.
     func createFile(
         relativePath: String,
         mode: mode_t = 0o644,
-        policy: ExtractionConflictPolicy
+        action: ConflictAction
     ) throws -> CreatedFile? {
         let components = relativePath.split(separator: "/").map(String.init)
         guard let name = components.last, !name.isEmpty else {
@@ -142,7 +144,7 @@ final class SecureDestination {
 
             let exists = Self.exists(parent: parent, name: targetName)
 
-            switch policy {
+            switch action {
             case .skip:
                 if exists { return nil }
             case .keepBoth:
@@ -151,10 +153,13 @@ final class SecureDestination {
                     targetName = unique
                     targetRelativePath = parentRelativePath.isEmpty ? unique : parentRelativePath + "/" + unique
                 }
-            case .replace, .ask:
+            case .replace:
                 if exists {
-                    // Refuse to replace a directory with a file, and refuse to
-                    // write through a symlink the archive did not create.
+                    // "Replace" means precisely this: replace the *file*. A
+                    // folder is never deleted to make way for one, and a
+                    // pre-existing symlink is never written through or removed
+                    // — the O_NOFOLLOW open below would fail anyway, and this
+                    // turns that into a message instead of a bare ELOOP.
                     var status = stat()
                     if fstatat(parent, targetName, &status, AT_SYMLINK_NOFOLLOW) == 0 {
                         let typeBits = POSIXFileType.of(stat: status)

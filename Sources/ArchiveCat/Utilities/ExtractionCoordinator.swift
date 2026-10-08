@@ -3,11 +3,13 @@
 //  ArchiveCat
 //
 //  Turns "Extract…" into a running extraction: destination picker, a real
-//  question when the destination already has files, then the work itself.
+//  question for every collision, then the work itself.
 //
-//  The conflict sheet is not cosmetic. The engine never overwrites silently, so
-//  when a conflict exists the user is asked *before* anything is written, and
-//  "Cancel" leaves the destination untouched.
+//  The conflict prompt is not cosmetic. The engine never overwrites silently:
+//  it reports each collision through `ExtractionOptions.conflictResolver`, this
+//  file puts the choice to the user as a sheet, and the engine executes exactly
+//  the answer it gets back. Nothing here touches libarchive, and nothing in
+//  ArchiveCore knows about AppKit.
 //
 
 import AppKit
@@ -17,19 +19,16 @@ import UniformTypeIdentifiers
 @MainActor
 enum ExtractionCoordinator {
 
-    /// How the user wants an extraction to proceed.
-    private struct Decision {
-        var destination: URL
-        var policy: ExtractionConflictPolicy
-    }
-
     // MARK: - Entry points
 
     /// Extract the current selection, asking for a destination.
     static func extractSelection(from model: BrowserViewModel, window: NSWindow?) {
         let entries = model.selectedEntries
         guard !entries.isEmpty else { return }
-        Task { await run(entries: entries, model: model, window: window, label: "Extracting") }
+        Task {
+            guard let destination = await chooseDestination(window: window) else { return }
+            run(entries: entries, destination: destination, model: model, window: window, label: "Extracting")
+        }
     }
 
     /// Extract the current selection straight to ~/Downloads.
@@ -37,13 +36,15 @@ enum ExtractionCoordinator {
         let entries = model.selectedEntries
         guard !entries.isEmpty else { return }
         guard let downloads = downloadsDirectory() else {
-            presentError(ArchiveError.destinationUnusable(
+            ErrorPresenter.present(ArchiveError.destinationUnusable(
                 url: URL(fileURLWithPath: NSHomeDirectory()),
                 reason: "The Downloads folder could not be located."
-            ), window: window)
+            ))
             return
         }
-        model.extract(entries: entries, destination: downloads, options: .default, label: "Extracting to Downloads")
+        // Deliberately the same path as a chosen destination: writing straight
+        // to Downloads must not be the one place that overwrites without asking.
+        run(entries: entries, destination: downloads, model: model, window: window, label: "Extracting to Downloads")
     }
 
     /// Extract every entry in the archive. Explicitly requested, never automatic.
@@ -51,21 +52,36 @@ enum ExtractionCoordinator {
         guard let document = model.document else { return }
         let entries = document.entries.filter { $0.safety.isSafe }
         guard !entries.isEmpty else { return }
-        Task { await run(entries: entries, model: model, window: window, label: "Extracting archive") }
+        Task {
+            guard let destination = await chooseDestination(window: window) else { return }
+            run(
+                entries: entries,
+                destination: destination,
+                model: model,
+                window: window,
+                label: "Extracting archive"
+            )
+        }
     }
 
     // MARK: - Flow
 
     private static func run(
         entries: [ArchiveEntry],
+        destination: URL,
         model: BrowserViewModel,
         window: NSWindow?,
         label: String
-    ) async {
-        guard let decision = await decideDestination(entries: entries, window: window) else { return }
+    ) {
+        // One prompt per operation, so "Apply to all" can stick for the rest of
+        // this extraction and only this one.
+        let prompt = ExtractionConflictPrompt(window: window, model: model)
 
         let options = ExtractionOptions(
-            conflictPolicy: decision.policy,
+            conflictPolicy: .ask,
+            conflictResolver: { conflict in
+                await prompt.resolution(for: conflict)
+            },
             preservePermissions: true,
             preserveModificationDates: true,
             stripSetuidAndSetgid: true,
@@ -75,32 +91,14 @@ enum ExtractionCoordinator {
             extractSpecialFiles: false
         )
 
-        model.extract(entries: entries, destination: decision.destination, options: options, label: label)
+        model.extract(entries: entries, destination: destination, options: options, label: label)
     }
 
-    /// Asks for a destination and, if needed, how to resolve conflicts.
-    ///
-    /// - Returns: `nil` when the user cancelled.
-    private static func decideDestination(entries: [ArchiveEntry], window: NSWindow?) async -> Decision? {
-        guard let destination = chooseDestination(window: window) else { return nil }
+    // MARK: - Destination picker
 
-        // Preflight with the *expanded* selection so folder selections report
-        // the files inside them, not just the folder.
-        let conflicts = ExtractionPreflight.conflicts(entries: entries, in: destination)
-        guard !conflicts.isEmpty else {
-            return Decision(destination: destination, policy: .replace)
-        }
-
-        guard let policy = askAboutConflicts(conflicts: conflicts, destination: destination, window: window) else {
-            return nil
-        }
-        return Decision(destination: destination, policy: policy)
-    }
-
-    // MARK: - Pickers and questions
-
-    /// Native destination picker.
-    private static func chooseDestination(window: NSWindow?) -> URL? {
+    /// Native destination picker, as a sheet on the document window when one is
+    /// available.
+    private static func chooseDestination(window: NSWindow?) async -> URL? {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -110,52 +108,19 @@ enum ExtractionCoordinator {
         panel.message = "Choose where to extract the selected items."
         panel.directoryURL = lastUsedDestination() ?? downloadsDirectory()
 
-        if let window {
-            let response = panel.runModal()
-            guard response == .OK, let url = panel.url else { return nil }
-            rememberDestination(url)
-            return url
+        let url: URL?
+        if let window, window.isVisible {
+            url = await withCheckedContinuation { continuation in
+                panel.beginSheetModal(for: window) { response in
+                    continuation.resume(returning: response == .OK ? panel.url : nil)
+                }
+            }
+        } else {
+            url = panel.runModal() == .OK ? panel.url : nil
         }
 
-        guard panel.runModal() == .OK, let url = panel.url else { return nil }
-        rememberDestination(url)
+        if let url { rememberDestination(url) }
         return url
-    }
-
-    /// Asks how to handle files that already exist.
-    ///
-    /// - Returns: the chosen policy, or `nil` when the user cancelled.
-    private static func askAboutConflicts(
-        conflicts: [ExtractionConflict],
-        destination: URL,
-        window: NSWindow?
-    ) -> ExtractionConflictPolicy? {
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = conflicts.count == 1
-            ? "An item named “\(conflicts[0].entry.name)” already exists."
-            : "\(conflicts.count) items already exist in “\(destination.lastPathComponent)”."
-
-        let preview = conflicts.prefix(6).map { "• \($0.entry.path)" }.joined(separator: "\n")
-        let remainder = conflicts.count > 6 ? "\n…and \(conflicts.count - 6) more." : ""
-        alert.informativeText = "\(preview)\(remainder)\n\nChoose how to continue. Nothing has been written yet."
-
-        alert.addButton(withTitle: "Keep Both")   // .alertFirstButtonReturn
-        alert.addButton(withTitle: "Replace")     // .alertSecondButtonReturn
-        alert.addButton(withTitle: "Skip")        // .alertThirdButtonReturn
-        alert.addButton(withTitle: "Cancel")
-
-        // Modal rather than window-modal: the question is about the
-        // destination, not about the document window, and it must be answered
-        // before anything is written.
-        _ = window
-        let response = alert.runModal()
-        switch response {
-        case .alertFirstButtonReturn: return .keepBoth
-        case .alertSecondButtonReturn: return .replace
-        case .alertThirdButtonReturn: return .skip
-        default: return nil
-        }
     }
 
     // MARK: - Locations
@@ -182,9 +147,113 @@ enum ExtractionCoordinator {
     private static func rememberDestination(_ url: URL) {
         UserDefaults.standard.set(url.path(percentEncoded: false), forKey: lastUsedDestinationKey)
     }
+}
 
-    private static func presentError(_ error: ArchiveError, window: NSWindow?) {
-        _ = window
-        ErrorPresenter.present(error)
+// MARK: - Conflict prompt
+
+/// Puts one collision to the user, and remembers "Apply to all".
+///
+/// Presented as a sheet on the document window when there is one, so it belongs
+/// to the window rather than blocking the whole application. The engine suspends
+/// on `resolution(for:)` while the sheet is up.
+@MainActor
+final class ExtractionConflictPrompt {
+
+    private weak var window: NSWindow?
+    /// Told when a sheet goes up and comes down, so the progress strip can
+    /// explain why extraction appears to be waiting.
+    private weak var model: BrowserViewModel?
+    /// The answer to reuse without asking again, once "Apply to all" is ticked.
+    private var appliedToAll: ExtractionConflictResolution?
+    /// Counts the collisions in this operation, so the sheet can say so.
+    private var resolvedCount = 0
+
+    init(window: NSWindow?, model: BrowserViewModel?) {
+        self.window = window
+        self.model = model
+    }
+
+    /// Asks about `conflict` unless the user already said "apply to all".
+    func resolution(for conflict: ExtractionConflict) async -> ExtractionConflictResolution {
+        if let appliedToAll {
+            resolvedCount += 1
+            return appliedToAll
+        }
+
+        model?.extraction.awaitingDecision = true
+        let answer = await present(conflict)
+        model?.extraction.awaitingDecision = false
+
+        // If the operation was cancelled while the sheet was up, that is the
+        // answer the engine should act on now.
+        if Task.isCancelled {
+            return .cancel
+        }
+
+        resolvedCount += 1
+        if answer.applyToAll {
+            appliedToAll = answer.resolution
+        }
+        return answer.resolution
+    }
+
+    private struct Answer {
+        let resolution: ExtractionConflictResolution
+        let applyToAll: Bool
+    }
+
+    private func present(_ conflict: ExtractionConflict) async -> Answer {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+
+        alert.messageText = "An item named “\(conflict.entry.name)” already exists in “\(conflict.destination.lastPathComponent)”."
+
+        var lines: [String] = []
+        if resolvedCount > 0 {
+            lines.append("\(resolvedCount) \(resolvedCount == 1 ? "item has" : "items have") already been handled in this extraction.")
+            lines.append("")
+        }
+        lines.append("ArchiveCat can replace it, skip this entry, or keep both by giving the extracted item a new name.")
+        if conflict.relativePath != conflict.entry.name {
+            lines.append("")
+            lines.append("Path: \(conflict.relativePath)")
+        }
+        alert.informativeText = lines.joined(separator: "\n")
+
+        // Keep Both first: it is the only answer that cannot destroy anything,
+        // so it is what Return does.
+        alert.addButton(withTitle: "Keep Both")   // first button: default
+        alert.addButton(withTitle: "Replace")
+        alert.addButton(withTitle: "Skip")
+        alert.addButton(withTitle: "Cancel")
+
+        let applyToAllButton = NSButton(checkboxWithTitle: "Apply to all", target: nil, action: nil)
+        applyToAllButton.state = .off
+        applyToAllButton.toolTip = "Use this answer for every remaining conflict in this extraction."
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        applyToAllButton.frame = NSRect(x: 0, y: 0, width: 320, height: 20)
+        accessory.addSubview(applyToAllButton)
+        alert.accessoryView = accessory
+
+        let response: NSApplication.ModalResponse
+        if let window, window.isVisible {
+            response = await withCheckedContinuation { continuation in
+                alert.beginSheetModal(for: window) { response in
+                    continuation.resume(returning: response)
+                }
+            }
+        } else {
+            response = alert.runModal()
+        }
+
+        let resolution: ExtractionConflictResolution
+        switch response {
+        case .alertFirstButtonReturn: resolution = .keepBoth
+        case .alertSecondButtonReturn: resolution = .replace
+        case .alertThirdButtonReturn: resolution = .skip
+        default: resolution = .cancel
+        }
+
+        return Answer(resolution: resolution, applyToAll: applyToAllButton.state == .on)
     }
 }
