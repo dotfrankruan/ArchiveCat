@@ -44,17 +44,25 @@ final class ArchiveDocumentFile: NSDocument {
     // Info.plist's CFBundleDocumentTypes; `openPanelContentTypes` below is only
     // for the panels ArchiveCat opens itself.
 
-    override class func canConcurrentlyReadDocuments(ofType typeName: String) -> Bool {
-        true
-    }
+    // `canConcurrentlyReadDocuments` is deliberately not overridden, so it
+    // keeps its default of false: documents are read on the main thread. That
+    // is what makes the `MainActor.assumeIsolated` calls below sound — the
+    // earlier revision returned true, which let NSDocumentController read a
+    // document on a background NSOperationQueue, so the assertion trapped the
+    // first time an archive was opened. Scanning the archive is already
+    // asynchronous; there is nothing to gain from concurrent *reads* here.
 
     /// ArchiveCat never modifies an archive.
     override var isEntireFileLoaded: Bool { false }
 
     override func read(from url: URL, ofType typeName: String) throws {
-        // Held for the document's lifetime; released in `close()`.
-        scopedAccess = SecurityScopedAccess(url: url, enabled: true)
-        archiveURL = url
+        // Reading happens on the main thread; the override is not annotated for
+        // it, so the invariant is asserted rather than assumed.
+        MainActor.assumeIsolated {
+            // Held for the document's lifetime; released in `close()`.
+            scopedAccess = SecurityScopedAccess(url: url, enabled: true)
+            archiveURL = url
+        }
     }
 
     override func makeWindowControllers() {
@@ -63,9 +71,22 @@ final class ArchiveDocumentFile: NSDocument {
     }
 
     override func close() {
-        scopedAccess?.end()
-        scopedAccess = nil
+        // AppKit closes documents on the main thread; `close()` itself is not
+        // annotated for it, so the invariant is asserted rather than assumed.
+        MainActor.assumeIsolated {
+            scopedAccess?.end()
+            scopedAccess = nil
+        }
+
         super.close()
+
+        // Closing this archive must not close the application: the delegate
+        // brings the empty state back if this was the last document open. This
+        // covers closes that do not go through the window (Close All, for
+        // instance); the window controller reports the ⌘W path.
+        MainActor.assumeIsolated {
+            (NSApp.delegate as? AppDelegate)?.documentDidClose()
+        }
     }
 
     // MARK: - Read-only

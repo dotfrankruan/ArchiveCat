@@ -8,9 +8,7 @@
 //  AppKit owns the lifecycle (documents, windows, menu bar, Quick Look panel)
 //  because those are the parts SwiftUI still does not model natively on macOS;
 //  everything inside a window is SwiftUI.
-//
-//  NOTE: replaced by the real application shell in the browser milestone.
-//
+
 
 import AppKit
 import ArchiveCore

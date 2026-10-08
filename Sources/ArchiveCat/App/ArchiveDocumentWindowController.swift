@@ -59,8 +59,18 @@ final class ArchiveDocumentWindowController: NSWindowController {
         window.tabbingMode = .automatic
         window.tabbingIdentifier = "ArchiveCatDocument"
         window.isRestorable = true
+        window.delegate = nil  // set below, once self exists
 
         super.init(window: window)
+
+        // Closing the window closes the document, so NSDocumentController drops
+        // it and the empty state can return. Without this a closed window would
+        // leave a windowless document behind.
+        shouldCloseDocument = true
+
+        // ⌘W closes the window; the controller is what notices, and it is the
+        // window delegate AppKit will consult for the rest of the window's life.
+        window.delegate = self
 
         document.browser = model
 
@@ -88,6 +98,13 @@ final class ArchiveDocumentWindowController: NSWindowController {
 
     deinit {
         observationTask?.cancel()
+    }
+
+    /// Closing the window closes the document (`shouldCloseDocument`), which
+    /// reports it through `ArchiveDocumentFile.close()`. Kept as a backstop so
+    /// the empty state returns even if a close path ever bypasses the document.
+    func windowWillClose(_ notification: Notification) {
+        (NSApp.delegate as? AppDelegate)?.documentDidClose()
     }
 
     // MARK: - Lifecycle
@@ -171,6 +188,8 @@ final class ArchiveDocumentWindowController: NSWindowController {
 
 // MARK: - Toolbar delegate
 
+extension ArchiveDocumentWindowController: NSWindowDelegate {}
+
 extension ArchiveDocumentWindowController: NSToolbarDelegate {
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -224,8 +243,6 @@ extension ArchiveDocumentWindowController: NSToolbarDelegate {
             item.paletteLabel = "Back/Forward"
             item.view = control
             item.isNavigational = true
-            item.minSize = control.fittingSize
-            item.maxSize = control.fittingSize
             backForwardControl = control
             return item
 
@@ -244,8 +261,6 @@ extension ArchiveDocumentWindowController: NSToolbarDelegate {
             item.paletteLabel = "Search"
             item.toolTip = "Search file names and paths in this archive (⌘F)"
             item.view = field
-            item.minSize = NSSize(width: 180, height: field.fittingSize.height)
-            item.maxSize = NSSize(width: 340, height: field.fittingSize.height)
             searchField = field
             return item
 
@@ -294,13 +309,19 @@ extension ArchiveDocumentWindowController {
     }
 
     override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
-        panel.dataSource = QuickLookCoordinator.shared
-        panel.delegate = QuickLookCoordinator.shared
+        // Quick Look calls these on the main thread; the overrides are not
+        // annotated for it.
+        MainActor.assumeIsolated {
+            panel.dataSource = QuickLookCoordinator.shared
+            panel.delegate = QuickLookCoordinator.shared
+        }
     }
 
     override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
-        panel.dataSource = nil
-        panel.delegate = nil
+        MainActor.assumeIsolated {
+            panel.dataSource = nil
+            panel.delegate = nil
+        }
     }
 }
 

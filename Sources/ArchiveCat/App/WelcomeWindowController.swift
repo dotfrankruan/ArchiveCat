@@ -45,9 +45,20 @@ final class WelcomeWindowController: NSWindowController {
         window.contentViewController = NSHostingController(rootView: view)
     }
 
+    /// Brings the empty state forward. Does nothing if it is already visible,
+    /// so callers can invoke it freely from lifecycle notifications.
     func show() {
-        showWindow(nil)
-        window?.makeKeyAndOrderFront(nil)
+        guard let window else { return }
+        if !window.isVisible {
+            showWindow(nil)
+        }
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    /// Takes the empty state away once an archive is open.
+    func hide() {
+        guard let window, window.isVisible else { return }
+        window.orderOut(nil)
     }
 
     /// Standard Open panel, filtered to archive types.
