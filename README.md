@@ -259,5 +259,9 @@ about libarchive.
 
 ## License
 
-No license has been chosen yet; the repository is currently all rights
-reserved.
+Apache License 2.0. Copyright 2026 Frank Ruan. See [LICENSE](LICENSE).
+
+You may use, copy, modify and redistribute ArchiveCat, including in commercial
+and proprietary works, provided the copyright notice and license text are
+preserved. The license also grants a patent licence covering the code, and
+disclaims all warranties. See [LICENSE](LICENSE) for the full terms.
