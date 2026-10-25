@@ -52,9 +52,11 @@ struct SidebarView: View {
         List(selection: $selection) {
             if let document = model.document, let tree = model.tree {
                 Section {
-                    let root = SidebarNode(path: "", name: model.title, tree: tree)
+                    // Inside a nested archive the list should name the archive
+                    // being browsed, not the document's root archive.
+                    let root = SidebarNode(path: "", name: model.currentArchiveName, tree: tree)
                     if root.children == nil {
-                        Label(model.title, systemImage: "archivebox")
+                        Label(model.currentArchiveName, systemImage: "archivebox")
                             .foregroundStyle(.secondary)
                             .tag("")
                     } else {

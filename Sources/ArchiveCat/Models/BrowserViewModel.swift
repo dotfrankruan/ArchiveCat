@@ -315,11 +315,14 @@ final class BrowserViewModel {
     func rescan() {
         // A rescan re-reads the document's archive; nested levels are discarded
         // because their parent may have changed underneath them.
-        releaseNestedLevels()
+        releaseAllNestedLevels()
         load()
     }
 
     private func apply(_ scanned: ArchiveDocument, rootURL: URL) {
+        // Any level from a previous scan is about to disappear; release its pin
+        // so the cache does not hold a file for a level that no longer exists.
+        releaseAllNestedLevels()
         nestedArchiveFailure = nil
         let level = Level(
             session: rootSession,
@@ -504,12 +507,24 @@ final class BrowserViewModel {
     }
 
     /// Drops every nested level, releasing their cache pins.
-    private func releaseNestedLevels() {
-        guard currentLevelIndex > 0 else { return }
-        for level in levels[(currentLevelIndex + 1)...] {
+    ///
+    /// The root level is kept: it is the document, not a materialised copy.
+    private func releaseAllNestedLevels() {
+        for level in levels.dropFirst() {
             releaseLevel(level)
         }
-        levels.removeSubrange((currentLevelIndex + 1)...)
+    }
+
+    /// Stops work and releases every cache pin this browser holds.
+    ///
+    /// Called when the document closes. Without it, closing a window while a
+    /// nested archive is open would leave the nested cache pinning a file that
+    /// nothing can ever view again.
+    func shutdown() {
+        scanTask?.cancel()
+        extractionTask?.cancel()
+        nestedTask?.cancel()
+        releaseAllNestedLevels()
     }
 
     private func releaseLevel(_ level: Level) {

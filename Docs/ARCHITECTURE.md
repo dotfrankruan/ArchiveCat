@@ -173,8 +173,13 @@ level and reports the problem.
 ```
 sources ─► CompressionPlanner.plan()    one metadata pass, fail fast, no writes
         ─► LibArchiveWriter            temp file in the destination directory
-        ─► commit                      fsync, rename(2), verify
+        ─► commit                      fsync, rename(2)/renameatx_np(RENAME_EXCL)
 ```
+
+`ArchiveFormatCatalog` lists the output formats explicitly — ZIP, TAR, TAR.GZ,
+TAR.BZ2, TAR.XZ, TAR.ZST — and filters that list through
+`LibArchiveWriter.probe` at runtime, so a libarchive built without a filter
+simply does not offer that format.
 
 The **planner** normalises the selection before any byte is written:
 
@@ -245,14 +250,30 @@ These hold across both responsibilities and are covered by tests:
 
 ## 8. Performance characteristics
 
-Measured on this machine (Apple Silicon, macOS 27, libarchive 3.8.9) and
-recorded by `Scripts/`-free `PerformanceRegressionTests`:
+Measured on Apple Silicon, macOS 27.0.1, libarchive 3.8.9, **debug build**:
+
+| Operation | Result |
+| --- | --- |
+| Scan 20 200-entry TAR (20.6 MB) | 0.12 s, repeatable |
+| 1 000 root listings (200 subdirectories) | 0.07 s (≈70 µs each) |
+| 1 000 directory lookups | 0.0004 s (≈0.4 µs each) |
+| ZIP 32 MiB incompressible | 0.46 s, 33.6 MB |
+| ZIP / TAR.GZ 35.2 MB text | 0.06 s, 103 kB |
+| Nested open, first / cached | 0.9 ms / 0.06 ms |
+
+Structural reasons, not just numbers:
 
 * Browsing performs **no member decompression**: a scan reads headers only
   (`archive_read_data_skip`).
-* Directory listing is a dictionary lookup plus array iteration; it never walks
-  the whole entry list.
-* Preview and nested caches are bounded and LRU-evicted.
+* Directory listing goes through the tree's dictionary plus its child arrays; it
+  never walks the whole entry list. `ArchiveFileSystemTests` asserts a bounded
+  time for 500 listings and lookups in a 2 100-entry archive as a regression
+  guard.
+* Single-member reads are a linear pass to the member (libarchive has no member
+  index to seek with) and are capped while streaming; previews and nested
+  archives are therefore cached rather than re-read.
+* Preview and nested caches are bounded and LRU-evicted, with live levels
+  pinned by reference count.
 * Compression streams in 256 KiB blocks; peak memory does not scale with file
   size.
 

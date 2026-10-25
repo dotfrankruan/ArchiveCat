@@ -145,9 +145,10 @@ struct BrowserLevelNavigationTests {
         #expect(model.title == "outer.zip")
         // The parent level remembered where it was.
         #expect(model.levels[0].currentPath == "artifacts")
-        // The breadcrumb names both archives.
+        // The breadcrumb names both archives; the subtitle names the nested one
+        // because the window title already says "outer.zip".
         #expect(model.archiveChain.map(\.displayName) == ["outer.zip", "inner.tar.gz"])
-        #expect(model.locationDescription.hasPrefix("outer.zip ▸ inner.tar.gz"))
+        #expect(model.locationDescription == "inner.tar.gz")
     }
 
     @Test("Enclosing Folder steps out of a nested archive, restoring the parent")

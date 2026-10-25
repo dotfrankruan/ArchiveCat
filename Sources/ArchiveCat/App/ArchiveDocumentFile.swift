@@ -78,6 +78,8 @@ final class ArchiveDocumentFile: NSDocument {
         // AppKit closes documents on the main thread; `close()` itself is not
         // annotated for it, so the invariant is asserted rather than assumed.
         MainActor.assumeIsolated {
+            // Release nested-archive cache pins before the browser goes away.
+            browser?.shutdown()
             scopedAccess?.end()
             scopedAccess = nil
         }
