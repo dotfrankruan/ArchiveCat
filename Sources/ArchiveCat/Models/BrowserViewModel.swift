@@ -2,10 +2,22 @@
 //  BrowserViewModel.swift
 //  ArchiveCat
 //
-//  All of the browser's behaviour: navigation, history, sorting, search,
-//  selection, preview and extraction. The SwiftUI views are thin on purpose —
-//  they render this model and forward intents to it, which keeps the logic
-//  testable and the views replaceable.
+//  All of the browser's behaviour: navigation, archive levels, history, sorting,
+//  search, selection, preview and extraction. The SwiftUI views are thin on
+//  purpose — they render this model and forward intents to it, which keeps the
+//  logic testable and the views replaceable.
+//
+//  Archive levels
+//  --------------
+//  The window always belongs to one document (the archive the user opened), but
+//  the browser can be *inside* a nested archive. That stack of archives lives
+//  here as `levels`: `levels[0]` is the document itself, and each further level
+//  is an archive materialised from a member of the one below it. Each level owns
+//  its own session, scanned document and per-archive navigation history, so
+//  going Back inside a nested tarball does not disturb the parent's position.
+//
+//  Dropping a level releases its pin in the nested-archive cache; the document
+//  (and therefore the user's archive file) is never modified.
 //
 
 import AppKit
@@ -25,6 +37,35 @@ final class BrowserViewModel {
         case failed(String)
     }
 
+    /// One archive in the navigation stack.
+    struct Level: Identifiable {
+        let id = UUID()
+        let session: ArchiveSession
+        let document: ArchiveDocument
+        /// Name shown in the breadcrumb: the root archive's file name, then the
+        /// nested member's name.
+        let displayName: String
+        /// Nested-cache pin to release when this level goes away. `nil` for the
+        /// document's own archive, which is not materialised.
+        let cacheKey: String?
+
+        /// Position inside this archive, remembered while a nested level is
+        /// open so popping back returns the user to where they were.
+        var currentPath: String = ""
+        var backStack: [String] = []
+        var forwardStack: [String] = []
+    }
+
+    /// A failure opening a nested archive, for the view layer to present.
+    ///
+    /// The model deliberately does not put up an alert itself: presenting UI was
+    /// making the model unusable outside a running app (and the alert is modal,
+    /// so it would block whatever triggered it).
+    struct NestedFailure: Identifiable {
+        let id = UUID()
+        let error: ArchiveError
+    }
+
     /// What the extraction sheet is currently doing.
     struct ExtractionState: Equatable {
         var isRunning = false
@@ -41,19 +82,28 @@ final class BrowserViewModel {
 
     // MARK: - Identity
 
+    /// The archive the document was opened with. It stays the window's identity
+    /// even while a nested archive is on screen.
     let archiveURL: URL
-    /// The engine session. Shared deliberately: extraction, preview and
-    /// drag-and-drop all run through the same session for this archive.
-    let session: ArchiveSession
+    private let nestedStore: NestedArchiveStore?
+
+    /// The document's own session. Kept separately so it can outlive a level
+    /// rebuild and so `load()` always has a target.
+    private let rootSession: ArchiveSession
 
     // MARK: - Observable state
 
     private(set) var phase: Phase = .loading
-    private(set) var document: ArchiveDocument?
-    private(set) var tree: ArchiveTree?
+    private(set) var levels: [Level] = []
+    private(set) var currentLevelIndex = 0
     private(set) var scanProgress: ArchiveScanProgress?
     private(set) var rows: [EntryRow] = []
     private(set) var folderRows: [EntryRow] = []
+    private(set) var isOpeningNestedArchive = false
+    /// Message describing the last nested-open failure (also shown as status).
+    private(set) var nestedArchiveError: String?
+    /// The failure itself, for the view to present with a real error sheet.
+    private(set) var nestedArchiveFailure: NestedFailure?
     var currentPath: String = ""
     var selection: Set<String> = []
     var searchText: String = "" {
@@ -79,37 +129,73 @@ final class BrowserViewModel {
 
     // MARK: - Private state
 
-    private var backStack: [String] = []
-    private var forwardStack: [String] = []
     private var searchIndex: ArchiveSearchIndex?
     private var scanTask: Task<Void, Never>?
     private var extractionTask: Task<Void, Never>?
+    private var nestedTask: Task<Void, Never>?
     private var statusClearTask: Task<Void, Never>?
 
     // MARK: - Init
 
-    init(session: ArchiveSession, archiveURL: URL) {
-        self.session = session
+    init(session: ArchiveSession, archiveURL: URL, nestedStore: NestedArchiveStore? = nil) {
+        self.rootSession = session
         self.archiveURL = archiveURL
+        self.nestedStore = nestedStore
     }
+
+    // MARK: - Current level
+
+    /// The archive currently being browsed (the root, or a nested one).
+    var currentLevel: Level? {
+        guard levels.indices.contains(currentLevelIndex) else { return nil }
+        return levels[currentLevelIndex]
+    }
+
+    var document: ArchiveDocument? { currentLevel?.document }
+    var tree: ArchiveTree? { currentLevel?.document.tree }
+    var session: ArchiveSession { currentLevel?.session ?? rootSession }
+
+    /// Name of the archive currently on screen, which is not the document's name
+    /// when a nested archive is open.
+    var currentArchiveName: String { currentLevel?.displayName ?? archiveURL.lastPathComponent }
+
+    /// The chain of archives, root first: `project.zip`, `backup.tar.gz`.
+    var archiveChain: [Level] { levels }
+
+    var isInsideNestedArchive: Bool { currentLevelIndex > 0 }
 
     // MARK: - Derived state
 
     var title: String { archiveURL.lastPathComponent }
 
     var currentDirectoryName: String {
-        currentPath.isEmpty ? archiveURL.lastPathComponent : ArchivePath.name(of: currentPath)
+        currentPath.isEmpty ? currentArchiveName : ArchivePath.name(of: currentPath)
     }
 
-    /// The path shown in the window subtitle: `Archive.zip ▸ usr ▸ local`.
+    /// The location shown in the window subtitle.
+    ///
+    /// The window title is already the document's archive name, so the root
+    /// archive is not repeated here. Nested archives are, because the title does
+    /// not mention them: `backup.tar.gz ▸ database` means "the backup archive
+    /// inside this document, in its database folder".
     var locationDescription: String {
         guard let tree else { return "" }
-        return tree.breadcrumb(to: currentPath).map(\.name).filter { !$0.isEmpty }.joined(separator: " ▸ ")
+        let nestedArchiveNames = levels.dropFirst().map(\.displayName)
+        let directories = tree.breadcrumb(to: currentPath)
+            .map(\.name)
+            .filter { !$0.isEmpty }
+        return (nestedArchiveNames + directories).joined(separator: " ▸ ")
     }
 
-    var canGoBack: Bool { !backStack.isEmpty }
-    var canGoForward: Bool { !forwardStack.isEmpty }
-    var canGoUp: Bool { !currentPath.isEmpty }
+    var canGoBack: Bool {
+        if currentLevel?.backStack.isEmpty == false { return true }
+        return currentLevelIndex > 0
+    }
+
+    var canGoForward: Bool { currentLevel?.forwardStack.isEmpty == false }
+
+    var canGoUp: Bool { !currentPath.isEmpty || currentLevelIndex > 0 }
+
     var isSearching: Bool { !searchText.trimmingCharacters(in: .whitespaces).isEmpty }
 
     /// Selected entries, in archive order, with implied folders expanded.
@@ -182,24 +268,43 @@ final class BrowserViewModel {
         document?.warnings.filter { $0.kind == kind } ?? []
     }
 
+    // MARK: - Nested archive affordance
+
+    /// Whether a file row can be opened as an archive.
+    ///
+    /// The name only decides whether the command is *offered*; opening validates
+    /// the real bytes by scanning them, so a misnamed file fails with a normal
+    /// error rather than being trusted.
+    func canOpenAsNestedArchive(_ row: EntryRow) -> Bool {
+        guard let entry = row.entry, entry.isRegularFile else { return false }
+        return ArchiveFormatCatalog.isArchiveCandidate(fileName: entry.name)
+    }
+
+    var canOpenSelectedNestedArchive: Bool {
+        guard selection.count == 1, let entry = primarySelection else { return false }
+        return entry.isRegularFile && ArchiveFormatCatalog.isArchiveCandidate(fileName: entry.name)
+    }
+
     // MARK: - Loading
 
-    /// Scans the archive and shows its root.
+    /// Scans the document's archive and shows its root.
     func load() {
         scanTask?.cancel()
         phase = .loading
         statusMessage = nil
+        nestedArchiveError = nil
 
         let url = archiveURL
+        let rootURL = archiveURL
         scanTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let scanned = try await session.open(url: url, options: .default) { progress in
+                let scanned = try await rootSession.open(url: url, options: .default) { progress in
                     Task { @MainActor [weak self] in
                         self?.scanProgress = progress
                     }
                 }
-                self.apply(scanned)
+                self.apply(scanned, rootURL: rootURL)
             } catch {
                 if (error as? ArchiveError)?.isCancellation == true { return }
                 self.phase = .failed(Self.message(for: error))
@@ -208,22 +313,27 @@ final class BrowserViewModel {
     }
 
     func rescan() {
-        guard case .failed = phase else {
-            load()
-            return
-        }
+        // A rescan re-reads the document's archive; nested levels are discarded
+        // because their parent may have changed underneath them.
+        releaseNestedLevels()
         load()
     }
 
-    private func apply(_ scanned: ArchiveDocument) {
-        document = scanned
-        tree = scanned.tree
+    private func apply(_ scanned: ArchiveDocument, rootURL: URL) {
+        nestedArchiveFailure = nil
+        let level = Level(
+            session: rootSession,
+            document: scanned,
+            displayName: rootURL.lastPathComponent,
+            cacheKey: nil
+        )
+        levels = [level]
+        currentLevelIndex = 0
         searchIndex = ArchiveSearchIndex(entries: scanned.entries)
-        backStack.removeAll()
-        forwardStack.removeAll()
         currentPath = ""
         selection.removeAll()
         scanProgress = nil
+        nestedArchiveError = nil
         phase = .ready
         rebuildRows()
 
@@ -238,9 +348,9 @@ final class BrowserViewModel {
         guard let tree, tree.containsDirectory(at: path) else { return }
         guard path != currentPath || !recordHistory else { return }
 
-        if recordHistory, !currentPath.isEmpty || path.isEmpty == false {
-            backStack.append(currentPath)
-            forwardStack.removeAll()
+        if recordHistory, levels.indices.contains(currentLevelIndex) {
+            levels[currentLevelIndex].backStack.append(currentPath)
+            levels[currentLevelIndex].forwardStack.removeAll()
         }
         currentPath = path
         selection.removeAll()
@@ -248,34 +358,52 @@ final class BrowserViewModel {
     }
 
     func goBack() {
-        guard let previous = backStack.popLast() else { return }
-        forwardStack.append(currentPath)
-        currentPath = previous
-        selection.removeAll()
-        rebuildRows()
+        if levels.indices.contains(currentLevelIndex), !levels[currentLevelIndex].backStack.isEmpty {
+            let previous = levels[currentLevelIndex].backStack.removeLast()
+            levels[currentLevelIndex].forwardStack.append(currentPath)
+            currentPath = previous
+            selection.removeAll()
+            rebuildRows()
+            return
+        }
+        // Nothing left inside this archive: step out of the nested archive.
+        popLevel()
     }
 
     func goForward() {
-        guard let next = forwardStack.popLast() else { return }
-        backStack.append(currentPath)
+        guard levels.indices.contains(currentLevelIndex),
+              !levels[currentLevelIndex].forwardStack.isEmpty
+        else { return }
+        let next = levels[currentLevelIndex].forwardStack.removeLast()
+        levels[currentLevelIndex].backStack.append(currentPath)
         currentPath = next
         selection.removeAll()
         rebuildRows()
     }
 
     func goUp() {
-        guard let parent = ArchivePath.parent(of: currentPath) else { return }
-        navigate(to: parent)
+        if !currentPath.isEmpty, let parent = ArchivePath.parent(of: currentPath) {
+            navigate(to: parent)
+            return
+        }
+        popLevel()
     }
 
-    /// Reveals an entry: navigates into it when it is a directory, and reports
-    /// whether it did.
+    /// Reveals an entry: navigates into a folder, or into a nested archive.
+    ///
+    /// - Returns: whether the entry could be opened.
     @discardableResult
     func open(row: EntryRow) -> Bool {
-        guard let directoryPath = row.directoryPath else { return false }
-        searchText = ""
-        navigate(to: directoryPath)
-        return true
+        if let directoryPath = row.directoryPath {
+            searchText = ""
+            navigate(to: directoryPath)
+            return true
+        }
+        if canOpenAsNestedArchive(row), let entry = row.entry {
+            openNestedArchive(entry)
+            return true
+        }
+        return false
     }
 
     func selectAll() {
@@ -284,6 +412,111 @@ final class BrowserViewModel {
 
     func fillSelection(withToBeSelected row: EntryRow) {
         selection = [row.id]
+    }
+
+    // MARK: - Nested archives
+
+    /// Opens `entry` as its own archive level.
+    func openNestedArchive(_ entry: ArchiveEntry) {
+        guard nestedTask == nil, !isOpeningNestedArchive else { return }
+        guard let level = currentLevel else { return }
+
+        guard let nestedStore else {
+            setStatus("Archives inside archives are unavailable right now.")
+            return
+        }
+
+        isOpeningNestedArchive = true
+        nestedArchiveError = nil
+        nestedArchiveFailure = nil
+        setStatus("Opening “\(entry.name)”…")
+
+        let depth = currentLevelIndex
+        let parentDocument = level.document
+        let parentSession = level.session
+
+        nestedTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.isOpeningNestedArchive = false
+                self.nestedTask = nil
+            }
+            do {
+                let opened = try await nestedStore.open(
+                    entry: entry,
+                    document: parentDocument,
+                    session: parentSession,
+                    depth: depth
+                )
+                // Remember where the parent was, then push the new level.
+                guard self.currentLevelIndex < self.levels.count else { return }
+                self.levels[self.currentLevelIndex].currentPath = self.currentPath
+                self.levels.append(Level(
+                    session: opened.session,
+                    document: opened.document,
+                    displayName: entry.name,
+                    cacheKey: opened.cacheKey
+                ))
+                self.currentLevelIndex = self.levels.count - 1
+                self.currentPath = ""
+                self.selection.removeAll()
+                self.searchText = ""
+                self.searchIndex = ArchiveSearchIndex(entries: opened.document.entries)
+                self.rebuildRows()
+                self.setStatus("Opened “\(entry.name)”.")
+            } catch {
+                guard (error as? ArchiveError)?.isCancellation != true else { return }
+                let archiveError = (error as? ArchiveError)
+                    ?? ArchiveError.underlying(reason: error.localizedDescription, technicalDetails: nil)
+                self.nestedArchiveError = Self.message(for: error)
+                self.nestedArchiveFailure = NestedFailure(error: archiveError)
+                self.setStatus("“\(entry.name)” could not be opened.")
+            }
+        }
+    }
+
+    /// Opens the single selected entry as a nested archive (menu/context menu).
+    func openSelectedNestedArchive() {
+        guard let entry = primarySelection else { return }
+        guard ArchiveFormatCatalog.isArchiveCandidate(fileName: entry.name) else { return }
+        openNestedArchive(entry)
+    }
+
+    /// Goes back to the archive at `index` in the chain, closing levels above it.
+    func popToLevel(_ index: Int) {
+        guard index >= 0, index < levels.count, index < currentLevelIndex else { return }
+        while currentLevelIndex > index {
+            let removed = levels.removeLast()
+            releaseLevel(removed)
+            currentLevelIndex = levels.count - 1
+        }
+        let restored = levels[currentLevelIndex]
+        currentPath = restored.currentPath
+        selection.removeAll()
+        searchIndex = ArchiveSearchIndex(entries: restored.document.entries)
+        rebuildRows()
+    }
+
+    /// Steps out of the current nested archive.
+    func popLevel() {
+        guard currentLevelIndex > 0 else { return }
+        popToLevel(currentLevelIndex - 1)
+    }
+
+    /// Drops every nested level, releasing their cache pins.
+    private func releaseNestedLevels() {
+        guard currentLevelIndex > 0 else { return }
+        for level in levels[(currentLevelIndex + 1)...] {
+            releaseLevel(level)
+        }
+        levels.removeSubrange((currentLevelIndex + 1)...)
+    }
+
+    private func releaseLevel(_ level: Level) {
+        guard let cacheKey = level.cacheKey, let nestedStore else { return }
+        Task {
+            await nestedStore.release(cacheKey: cacheKey)
+        }
     }
 
     // MARK: - Search
@@ -305,35 +538,28 @@ final class BrowserViewModel {
 
         if isSearching {
             rows = searchResults().map { EntryRow(entry: $0, containingPath: ArchivePath.parent(of: $0.path)) }
-        } else {
-            guard let directory = tree.directory(at: currentPath) else {
-                rows = []
-                folderRows = []
-                return
-            }
-
+        } else if tree.directory(at: currentPath) != nil {
+            // Directory enumeration goes through the virtual filesystem, so the
+            // browser and the engine cannot disagree about what a directory
+            // contains.
+            let fileSystem = ArchiveFileSystem(document: document)
             var built: [EntryRow] = []
-            built.reserveCapacity(directory.childDirectoryPaths.count + directory.childEntryIndices.count)
-
-            // Directories first is handled by `sortName`, but the *listing*
-            // follows the archive's own order, exactly like Finder's unsorted
-            // listing follows the file system's.
-            for childPath in directory.childDirectoryPaths {
-                guard let child = tree.directory(at: childPath) else { continue }
-                if let entryIndex = child.entryIndex {
-                    built.append(EntryRow(entry: document.entries[entryIndex], containingPath: currentPath))
-                } else {
-                    built.append(EntryRow(directory: child, containingPath: currentPath))
+            for node in fileSystem.children(ofDirectoryAt: currentPath) {
+                if let entry = node.entry, !entry.isDirectory {
+                    built.append(EntryRow(entry: entry, containingPath: currentPath))
+                } else if let directory = node.directory {
+                    // Directories (explicit or implied) are represented by their
+                    // directory node, exactly as the filesystem lists them.
+                    built.append(EntryRow(directory: directory, containingPath: currentPath))
+                } else if let entry = node.entry {
+                    built.append(EntryRow(entry: entry, containingPath: currentPath))
                 }
             }
-            for entryIndex in directory.childEntryIndices {
-                let entry = document.entries[entryIndex]
-                // An explicit directory entry is already represented by its
-                // directory node above; skip it here so it is not listed twice.
-                if entry.isDirectory, tree.containsDirectory(at: entry.path) { continue }
-                built.append(EntryRow(entry: entry, containingPath: currentPath))
-            }
             rows = built
+        } else {
+            rows = []
+            folderRows = []
+            return
         }
 
         // The archive's own order is never mutated: sorting produces a new
@@ -352,6 +578,8 @@ final class BrowserViewModel {
     func quickLook() {
         let entries = selectedRealEntries
         guard !entries.isEmpty else { return }
+        let session = self.session
+        let document = self.document
         Task { await QuickLookCoordinator.shared.toggle(entries: entries, session: session, document: document) }
     }
 
@@ -386,6 +614,10 @@ final class BrowserViewModel {
         guard extractionTask == nil else { return }
 
         extraction = ExtractionState(isRunning: true, title: label, progress: nil, destination: destination)
+
+        // Bind the extraction to the level it started from, so navigating into a
+        // nested archive mid-extraction cannot change what is being read.
+        let session = self.session
 
         extractionTask = Task { [weak self] in
             guard let self else { return }
@@ -453,11 +685,12 @@ final class BrowserViewModel {
         extraction.revealURL = nil
     }
 
-    /// Empties the preview cache this document has been using.
+    /// Empties the preview cache the current session has been using.
     func clearPreviewCache() {
-        Task { [session] in
+        let session = self.session
+        Task { [weak self] in
             await session.purgePreviewCache()
-            setStatus("Preview cache cleared.")
+            self?.setStatus("Preview cache cleared.")
         }
     }
 
@@ -470,10 +703,11 @@ final class BrowserViewModel {
     func copyPathsOfSelection() {
         let entries = selectedRealEntries
         guard !entries.isEmpty else { return }
+        // The whole location — every archive in the chain plus the path inside
+        // the innermost one — is the useful thing to paste elsewhere.
+        let chain = levels.map(\.displayName).joined(separator: " ▸ ")
         let text = entries.map { entry -> String in
-            // The full path inside the archive, including the archive name, is
-            // the most useful thing to paste into a shell or a bug report.
-            "\(archiveURL.lastPathComponent) ▸ \(entry.path)"
+            "\(chain) ▸ \(entry.path)"
         }.joined(separator: "\n")
 
         let pasteboard = NSPasteboard.general

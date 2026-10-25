@@ -147,6 +147,18 @@ let package = Package(
         // ---------------------------------------------------------------------
         // Tests. The engine is testable without launching the GUI.
         // ---------------------------------------------------------------------
+        // ---------------------------------------------------------------------
+        // UI-level tests for the browser model (navigation across archive
+        // levels). They import the executable target, which SwiftPM supports
+        // for testing since Swift 5.5; nothing here launches the GUI.
+        // ---------------------------------------------------------------------
+        .testTarget(
+            name: "ArchiveCatTests",
+            dependencies: ["ArchiveCat", "ArchiveCore"],
+            path: "Tests/ArchiveCatTests",
+            swiftSettings: libarchiveSwiftSettings
+        ),
+
         .testTarget(
             name: "ArchiveCoreTests",
             dependencies: ["ArchiveCore", "CArchive"],

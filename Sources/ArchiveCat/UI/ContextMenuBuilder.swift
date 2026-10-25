@@ -34,6 +34,14 @@ enum ContextMenuBuilder {
         if containsFile {
             menu.addItem(item("Quick Look", #selector(ArchiveCatMenuActions.quickLookSelection(_:))))
         }
+        // A single archive-looking file can be browsed in place. The name only
+        // decides whether to offer it; opening validates the bytes.
+        if !multiple,
+           let entry = selected.first?.entry,
+           entry.isRegularFile,
+           ArchiveFormatCatalog.isArchiveCandidate(fileName: entry.name) {
+            menu.addItem(item("Open Archive Inside", #selector(ArchiveCatMenuActions.openNestedArchive(_:))))
+        }
 
         if containsFile || containsDirectory {
             menu.addItem(.separator())

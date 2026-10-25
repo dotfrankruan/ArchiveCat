@@ -53,6 +53,10 @@ import AppKit
     func toggleSidebar(_ sender: Any?)
     /// Application menu — empty the preview cache.
     func clearPreviewCache(_ sender: Any?)
+    /// ⇧⌘N — create a new archive from files and folders.
+    func createArchive(_ sender: Any?)
+    /// ⇧⌘O — open the selected entry as an archive inside this one.
+    func openNestedArchive(_ sender: Any?)
 }
 
 @MainActor
@@ -135,6 +139,16 @@ enum MainMenuBuilder {
         clearItem.target = NSDocumentController.shared
         recentItem.submenu = recentMenu
         menu.addItem(recentItem)
+
+        menu.addItem(.separator())
+
+        // Creating an archive is a File command, and it is independent of the
+        // document: the sources are files on disk, not the open archive. The
+        // document itself is never modified.
+        menu.addItem(withTitle: "Create Archive…",
+                     action: #selector(ArchiveCatMenuActions.createArchive(_:)),
+                     keyEquivalent: "n",
+                     modifiers: [.command, .shift])
 
         menu.addItem(.separator())
 
@@ -266,6 +280,13 @@ enum MainMenuBuilder {
         menu.addItem(withTitle: "Open",
                      action: #selector(ArchiveCatMenuActions.openSelectedEntry(_:)),
                      keyEquivalent: "\r")
+
+        // Nested archives are navigation, not a new document, so this lives in
+        // Go next to Open rather than in File.
+        menu.addItem(withTitle: "Open Archive Inside",
+                     action: #selector(ArchiveCatMenuActions.openNestedArchive(_:)),
+                     keyEquivalent: "o",
+                     modifiers: [.command, .shift])
 
         item.submenu = menu
         return item

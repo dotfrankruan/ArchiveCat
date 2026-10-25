@@ -41,7 +41,11 @@ final class ArchiveDocumentWindowController: NSWindowController {
 
     init(document: ArchiveDocumentFile) {
         self.archiveDocument = document
-        self.model = BrowserViewModel(session: document.session, archiveURL: document.archiveURL)
+        self.model = BrowserViewModel(
+            session: document.session,
+            archiveURL: document.archiveURL,
+            nestedStore: document.nestedArchiveCache
+        )
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1_020, height: 640),
@@ -379,7 +383,15 @@ extension ArchiveDocumentWindowController: ArchiveCatMenuActions, BrowserSortAct
 
     func rescanArchive(_ sender: Any?) {
         model.searchText = ""
-        model.load()
+        model.rescan()
+    }
+
+    func createArchive(_ sender: Any?) {
+        CompressionCoordinator.createArchive(from: window)
+    }
+
+    func openNestedArchive(_ sender: Any?) {
+        model.openSelectedNestedArchive()
     }
 
     func clearPreviewCache(_ sender: Any?) {
@@ -428,6 +440,10 @@ extension ArchiveDocumentWindowController: NSMenuItemValidation {
             return hasSelection
         case #selector(openSelectedEntry(_:)):
             return hasSelection
+        case #selector(openNestedArchive(_:)):
+            return model.canOpenSelectedNestedArchive && !model.isOpeningNestedArchive
+        case #selector(createArchive(_:)):
+            return true
         case #selector(extractSelection(_:)), #selector(extractSelectionToDownloads(_:)):
             return hasSelection && !model.extraction.isRunning
         case #selector(extractEntireArchive(_:)):

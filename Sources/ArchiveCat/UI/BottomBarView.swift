@@ -26,6 +26,13 @@ struct BottomBarView: View {
 
             if model.extraction.isRunning {
                 extractionProgress
+            } else if model.isOpeningNestedArchive {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Opening archive inside…")
+                }
+                .font(.callout)
+                .foregroundStyle(.secondary)
             } else if let message = model.statusMessage {
                 Text(message)
                     .font(.callout)
@@ -44,16 +51,21 @@ struct BottomBarView: View {
 
     // MARK: - Breadcrumb
 
+    /// The breadcrumb is a *location*, and with nested archives a location has
+    /// two parts: the chain of archives (outermost first) and the directory path
+    /// inside the innermost one. Archive segments pop back to that archive;
+    /// directory segments navigate within it.
     private var breadcrumb: some View {
         HStack(spacing: 2) {
-            if let document = model.document {
-                crumb(title: document.fileName, systemImage: "archivebox", path: "")
+            ForEach(Array(model.archiveChain.enumerated()), id: \.element.id) { index, level in
+                if index > 0 {
+                    separator
+                }
+                archiveCrumb(index: index, level: level)
             }
 
             ForEach(crumbs, id: \.path) { crumbItem in
-                Image(systemName: "chevron.compact.right")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                separator
                 crumb(
                     title: crumbItem.name,
                     systemImage: nil,
@@ -62,6 +74,40 @@ struct BottomBarView: View {
             }
         }
         .lineLimit(1)
+    }
+
+    private var separator: some View {
+        Image(systemName: "chevron.compact.right")
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+    }
+
+    private func archiveCrumb(index: Int, level: BrowserViewModel.Level) -> some View {
+        let isCurrentArchive = index == model.currentLevelIndex
+        let isCurrentLocation = isCurrentArchive && model.currentPath.isEmpty
+
+        return Button {
+            if index < model.currentLevelIndex {
+                model.popToLevel(index)
+            } else {
+                model.navigate(to: "")
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: index == 0 ? "archivebox" : "archivebox.circle")
+                    .font(.caption)
+                Text(level.displayName)
+                    .font(.callout)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .foregroundStyle(isCurrentLocation ? .primary : .secondary)
+        }
+        .buttonStyle(.plain)
+        .disabled(isCurrentLocation)
+        .help(index < model.currentLevelIndex
+            ? "Return to \(level.displayName)"
+            : level.displayName)
     }
 
     private func crumb(title: String, systemImage: String?, path: String) -> some View {

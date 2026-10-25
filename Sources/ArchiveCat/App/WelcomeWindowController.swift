@@ -38,6 +38,9 @@ final class WelcomeWindowController: NSWindowController {
             onChooseArchive: { [weak self] in
                 self?.chooseArchive()
             },
+            onCreateArchive: { [weak self] in
+                CompressionCoordinator.createArchive(from: self?.window)
+            },
             onOpenURLs: { urls in
                 DocumentOpener.shared.open(urls)
             }

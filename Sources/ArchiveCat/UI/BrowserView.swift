@@ -47,6 +47,11 @@ struct BrowserView: View {
                 model.load()
             }
         }
+        // Presenting the error is the view's job; the model only reports it.
+        .onChange(of: model.nestedArchiveFailure?.id) { _, _ in
+            guard let failure = model.nestedArchiveFailure else { return }
+            ErrorPresenter.present(failure.error)
+        }
     }
 
     // MARK: - Detail

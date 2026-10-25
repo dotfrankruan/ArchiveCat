@@ -34,6 +34,10 @@ final class ArchiveDocumentFile: NSDocument {
     /// Set by the window controller so the menu bar can reach the browser.
     weak var browser: BrowserViewModel?
 
+    /// Shared, process-wide cache for archives opened from inside archives.
+    /// One budget for the whole app, not one per window.
+    var nestedArchiveCache: NestedArchiveStore? { NestedArchiveCache.shared() }
+
     // NOTE: `readableTypes` is deliberately *not* overridden.
     //
     // It looks like the natural place to advertise archive formats, but the

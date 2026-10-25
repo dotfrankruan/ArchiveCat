@@ -16,6 +16,7 @@ import UniformTypeIdentifiers
 struct EmptyStateView: View {
 
     let onChooseArchive: () -> Void
+    let onCreateArchive: () -> Void
     let onOpenURLs: ([URL]) -> Void
 
     @State private var isTargeted = false
@@ -37,6 +38,11 @@ struct EmptyStateView: View {
             Button("Open Archive…", action: onChooseArchive)
                 .controlSize(.large)
                 .keyboardShortcut(.defaultAction)
+
+            // Creating an archive is the other half of what ArchiveCat does, so
+            // it is reachable from the empty state as well as from the File menu.
+            Button("Create Archive…", action: onCreateArchive)
+                .controlSize(.regular)
 
             Text("or drag an archive here")
                 .font(.callout)
