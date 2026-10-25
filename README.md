@@ -328,7 +328,7 @@ make test                        # engine and browser-model suites
 Scripts/verify-lifecycle.sh      # document lifecycle smoke test (needs a built app)
 ```
 
-**148 tests in 15 suites**, in two targets:
+**154 tests in 16 suites**, in two targets:
 
 * `ArchiveCoreTests` — path safety; the virtual tree and virtual filesystem
   (implicit directories, duplicate paths and duplicate-path identity, unicode
@@ -348,7 +348,10 @@ Scripts/verify-lifecycle.sh      # document lifecycle smoke test (needs a built 
   `BrowserViewModel`: opening a nested archive pushes a level, the parent
   remembers its folder, Back/Enclosing Folder/breadcrumb all pop correctly, a
   directory is not offered as a nested archive, and a corrupt nested archive
-  reports a failure while leaving the parent intact.
+  reports a failure while leaving the parent intact. Plus UI wiring that can be
+  checked without clicking: the File/Go menu items and their shortcuts, the
+  save panel's format/level accessory, and the absence of any modification
+  capability.
 
 Every archive created by the tests is validated by reopening it through the
 normal reading engine and comparing extracted bytes (hashes for the large file).
