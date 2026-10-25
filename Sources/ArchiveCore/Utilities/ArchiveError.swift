@@ -67,6 +67,18 @@ public enum ArchiveError: Error, Sendable, LocalizedError {
     case cancelled
     /// Preview could not be produced.
     case previewUnavailable(entryPath: String, reason: String)
+    /// A new archive could not be written.
+    case compressionFailed(destination: URL, reason: String, technicalDetails: String?)
+    /// The output file already exists and replacing it was not confirmed.
+    case destinationExists(url: URL)
+    /// A file or directory that was meant to be archived could not be read.
+    case sourceUnavailable(path: String, reason: String)
+    /// A generated name would not be a safe path inside the new archive.
+    case invalidOutputName(name: String, reason: String)
+    /// The destination volume cannot hold the archive being created.
+    case notEnoughSpace(destination: URL, required: Int64, available: Int64)
+    /// An archive inside an archive could not be opened.
+    case nestedArchiveUnavailable(path: String, reason: String)
     /// Anything else, wrapped so nothing escapes as a raw POSIX error.
     case underlying(reason: String, technicalDetails: String?)
 
@@ -93,6 +105,18 @@ public enum ArchiveError: Error, Sendable, LocalizedError {
             return "The operation was cancelled."
         case .previewUnavailable:
             return "ArchiveCat couldn’t prepare a preview."
+        case .compressionFailed:
+            return "ArchiveCat couldn’t create the archive."
+        case .destinationExists:
+            return "An item with that name already exists."
+        case .sourceUnavailable:
+            return "ArchiveCat couldn’t read an item it was asked to archive."
+        case .invalidOutputName:
+            return "ArchiveCat couldn’t name an item inside the new archive."
+        case .notEnoughSpace:
+            return "There isn’t enough space to create this archive."
+        case .nestedArchiveUnavailable:
+            return "ArchiveCat couldn’t open the archive inside this one."
         case .underlying:
             return "ArchiveCat couldn’t complete the operation."
         }
@@ -127,6 +151,18 @@ public enum ArchiveError: Error, Sendable, LocalizedError {
             return "The operation stopped before it finished."
         case let .previewUnavailable(entryPath, reason):
             return "“\(entryPath)” could not be prepared for Quick Look. \(reason)"
+        case let .compressionFailed(destination, reason, _):
+            return "“\(destination.lastPathComponent)” was not created. \(reason)"
+        case let .destinationExists(url):
+            return "“\(url.lastPathComponent)” already exists. ArchiveCat never replaces a file without asking."
+        case let .sourceUnavailable(path, reason):
+            return "“\(path)” could not be read while creating the archive. \(reason)"
+        case let .invalidOutputName(name, reason):
+            return "“\(name)” is not a usable name inside an archive. \(reason)"
+        case let .notEnoughSpace(destination, required, available):
+            return "Creating this archive needs about \(ArchiveCatFormat.byteCount(required)), but only \(ArchiveCatFormat.byteCount(available)) is available on the volume containing “\(destination.lastPathComponent)”."
+        case let .nestedArchiveUnavailable(path, reason):
+            return "“\(path)” could not be opened in place. \(reason)"
         case let .underlying(reason, _):
             return reason
         }
@@ -139,12 +175,16 @@ public enum ArchiveError: Error, Sendable, LocalizedError {
              let .unsupportedFormat(_, details),
              let .corrupted(_, _, details),
              let .extractionFailed(_, _, _, details),
+             let .compressionFailed(_, _, details),
              let .underlying(_, details):
             guard let details, !details.isEmpty else { return nil }
             return details
         case let .limitExceeded(kind, limit, observed):
             return "limit kind: \(kind.rawValue), limit: \(limit), observed: \(observed)"
-        case .encrypted, .unsafePath, .destinationUnusable, .cancelled, .previewUnavailable:
+        case let .sourceUnavailable(path, reason):
+            return "\(path): \(reason)"
+        case .encrypted, .unsafePath, .destinationUnusable, .cancelled, .previewUnavailable,
+             .destinationExists, .invalidOutputName, .notEnoughSpace, .nestedArchiveUnavailable:
             return nil
         }
     }
@@ -169,6 +209,18 @@ public enum ArchiveError: Error, Sendable, LocalizedError {
             return nil
         case .previewUnavailable:
             return "You can still extract the file and open it with another application."
+        case .compressionFailed:
+            return "Check that you can read every item you selected and that the destination folder is writable."
+        case .destinationExists:
+            return "Choose a different name, or confirm that you want to replace the existing file."
+        case .sourceUnavailable:
+            return "The item may have been moved, deleted, or had its permissions changed while the archive was being created."
+        case .invalidOutputName:
+            return "Rename the item on disk and try again."
+        case .notEnoughSpace:
+            return "Free up space on the destination volume, or choose a different location."
+        case .nestedArchiveUnavailable:
+            return "You can extract the archive first and open it as its own document."
         case .underlying:
             return nil
         }

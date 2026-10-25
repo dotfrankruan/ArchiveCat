@@ -391,3 +391,92 @@ extension LibArchiveEntrySnapshot {
         return (String(decoding: bytes, as: UTF8.self), false)
     }
 }
+
+// MARK: - Container families
+
+/// Normalised container family, derived from libarchive's format code.
+///
+/// The rest of `ArchiveCore` reasons about containers with this enum rather than
+/// with `ARCHIVE_FORMAT_*` constants, which keeps libarchive's numbering (and
+/// the `CArchive` import) inside the reading bridge.
+public enum ArchiveContainerKind: String, Sendable, Hashable, CaseIterable {
+    case zip
+    case tar
+    case sevenZip
+    case rar
+    case xar
+    case cpio
+    case iso9660
+    case ar
+    case lha
+    case cab
+    case warc
+    case mtree
+    case shar
+    case empty
+    case other
+
+    public init(formatCode: Int32) {
+        switch formatCode & ARCHIVE_FORMAT_BASE_MASK {
+        case ARCHIVE_FORMAT_ZIP: self = .zip
+        case ARCHIVE_FORMAT_TAR: self = .tar
+        case ARCHIVE_FORMAT_7ZIP: self = .sevenZip
+        case ARCHIVE_FORMAT_RAR, ARCHIVE_FORMAT_RAR_V5: self = .rar
+        case ARCHIVE_FORMAT_XAR: self = .xar
+        case ARCHIVE_FORMAT_CPIO: self = .cpio
+        case ARCHIVE_FORMAT_ISO9660: self = .iso9660
+        case ARCHIVE_FORMAT_AR: self = .ar
+        case ARCHIVE_FORMAT_LHA: self = .lha
+        case ARCHIVE_FORMAT_CAB: self = .cab
+        case ARCHIVE_FORMAT_WARC: self = .warc
+        case ARCHIVE_FORMAT_MTREE: self = .mtree
+        case ARCHIVE_FORMAT_SHAR: self = .shar
+        case ARCHIVE_FORMAT_EMPTY: self = .empty
+        default: self = .other
+        }
+    }
+
+    /// Whether the *container* is indexed well enough that the reader can jump
+    /// to a member without decompressing everything before it.
+    ///
+    /// This is only half the story: a sequential outer filter (gzip, bzip2, xz,
+    /// zstd) turns any container back into a stream. `ArchiveCapabilities`
+    /// decides the final answer from both facts.
+    public var hasMemberIndex: Bool {
+        switch self {
+        case .zip, .tar, .sevenZip, .rar, .xar, .cpio, .iso9660, .ar, .lha, .cab:
+            return true
+        case .warc, .mtree, .shar, .empty, .other:
+            return false
+        }
+    }
+
+    /// Whether this container records POSIX ownership/permissions faithfully.
+    public var preservesPOSIXMetadata: Bool {
+        switch self {
+        case .tar, .cpio, .xar, .cpio: return true
+        case .zip, .sevenZip, .rar, .iso9660, .ar, .lha, .cab: return false
+        case .warc, .mtree, .shar, .empty, .other: return false
+        }
+    }
+
+    public var localizedName: String {
+        switch self {
+        case .zip: return "ZIP"
+        case .tar: return "Tar"
+        case .sevenZip: return "7-Zip"
+        case .rar: return "RAR"
+        case .xar: return "XAR"
+        case .cpio: return "CPIO"
+        case .iso9660: return "ISO 9660"
+        case .ar: return "ar"
+        case .lha: return "LHA"
+        case .cab: return "CAB"
+        case .warc: return "WARC"
+        case .mtree: return "mtree"
+        case .shar: return "Shell archive"
+        case .empty: return "Empty"
+        case .other: return "Archive"
+        }
+    }
+}

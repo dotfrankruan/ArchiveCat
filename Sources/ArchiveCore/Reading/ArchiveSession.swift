@@ -116,6 +116,16 @@ public actor ArchiveSession: ArchiveReading {
         return finished
     }
 
+    /// Adopts an already-scanned document for `url`.
+    ///
+    /// Used by the nested-archive cache: the store scanned the materialised file
+    /// when it first opened it, and Back/Forward must not rescan a large nested
+    /// archive just to recreate a session for it.
+    public func adopt(url: URL, document: ArchiveDocument) {
+        self.url = url
+        self.document = document
+    }
+
     // MARK: - Extraction
 
     /// Extracts one entry, preserving its path inside the archive.
@@ -158,10 +168,13 @@ public actor ArchiveSession: ArchiveReading {
         let archiveURL = document.url
         let service = extractionService
 
-        return try await Task.detached(priority: .userInitiated) {
+        // Off the main thread, but asynchronous: a conflict prompt suspends
+        // inside here until the user answers. Cancellation is forwarded to the
+        // detached task explicitly, because detached tasks do not inherit it —
+        // without this, cancelling an extraction from the UI would leave it
+        // running invisibly.
+        let task = Task.detached(priority: .userInitiated) {
             do {
-                // Off the main thread, but asynchronous: a conflict prompt
-                // suspends inside here until the user answers.
                 return try await service.extract(
                     archiveURL: archiveURL,
                     entries: expanded,
@@ -172,7 +185,12 @@ public actor ArchiveSession: ArchiveReading {
             } catch is CancellationError {
                 throw ArchiveError.cancelled
             }
-        }.value
+        }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
 
     /// Extracts every entry in the archive. Only used when the user explicitly
@@ -192,6 +210,50 @@ public actor ArchiveSession: ArchiveReading {
             options: options,
             progress: progress
         )
+    }
+
+    // MARK: - Virtual filesystem and content access
+
+    /// A read-only virtual filesystem over the scanned document, or `nil` when
+    /// no archive is open.
+    public func fileSystem() async -> ArchiveFileSystem? {
+        guard let document else { return nil }
+        return ArchiveFileSystem(document: document)
+    }
+
+    /// Capabilities of the open archive, or `nil` when none is open.
+    public func capabilities() async -> ArchiveCapabilities? {
+        guard let document else { return nil }
+        return ArchiveCapabilities.reading(format: document.format)
+    }
+
+    /// Reads a bounded prefix of one member.
+    ///
+    /// Runs off the actor: the scan is blocking I/O, and the actor must stay
+    /// free for navigation while it happens.
+    public func readEntryData(_ entry: ArchiveEntry, maxBytes: Int = 4096) async throws -> Data {
+        guard let document else {
+            throw ArchiveError.underlying(reason: "No archive is open.", technicalDetails: nil)
+        }
+        guard entry.safety.isSafe else {
+            throw ArchiveError.unsafePath(path: entry.rawPath, violation: entry.safety.violation ?? .parentTraversal)
+        }
+
+        let archiveURL = document.url
+        let ordinal = entry.ordinal
+
+        let task = Task.detached(priority: .userInitiated) {
+            try EntryContentReader.readData(archiveURL: archiveURL, ordinal: ordinal, maxBytes: maxBytes)
+        }
+        do {
+            return try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                task.cancel()
+            }
+        } catch is CancellationError {
+            throw ArchiveError.cancelled
+        }
     }
 
     // MARK: - Preview

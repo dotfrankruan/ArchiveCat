@@ -80,9 +80,11 @@ extension ArchiveError {
     /// Errors that concern untrusted input get the more serious alert style.
     var isSecurityRelevant: Bool {
         switch self {
-        case .unsafePath, .corrupted, .limitExceeded, .encrypted: return true
+        case .unsafePath, .corrupted, .limitExceeded, .encrypted, .invalidOutputName: return true
         case .cannotOpen, .unsupportedFormat, .extractionFailed, .destinationUnusable,
-             .cancelled, .previewUnavailable, .underlying:
+             .cancelled, .previewUnavailable, .underlying, .compressionFailed,
+             .destinationExists, .sourceUnavailable, .notEnoughSpace,
+             .nestedArchiveUnavailable:
             return false
         }
     }

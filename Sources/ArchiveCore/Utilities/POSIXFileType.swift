@@ -32,4 +32,19 @@ enum POSIXFileType {
     static func of(mode: mode_t) -> mode_t {
         mode & mask
     }
+
+    /// Whether a full mode value describes a regular file.
+    static func isRegular(_ mode: mode_t) -> Bool {
+        of(mode: mode) == regular
+    }
+
+    /// Whether a full mode value describes a directory.
+    static func isDirectory(_ mode: mode_t) -> Bool {
+        of(mode: mode) == directory
+    }
+
+    /// Whether a full mode value describes a symbolic link.
+    static func isSymbolicLink(_ mode: mode_t) -> Bool {
+        of(mode: mode) == symbolicLink
+    }
 }

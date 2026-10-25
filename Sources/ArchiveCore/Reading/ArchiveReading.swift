@@ -31,6 +31,19 @@ public protocol ArchiveReading: Sendable {
     /// Extracts only the given entry into the preview cache and returns the
     /// resulting file URL. Never extracts the whole archive.
     func materializeForPreview(entry: ArchiveEntry) async throws -> URL
+
+    /// Reads at most `maxBytes` bytes of one member into memory.
+    ///
+    /// This is a *linear pass* to the member's ordinal for every format (see
+    /// `EntryContentReader`), capped so a huge member cannot be pulled into RAM.
+    /// Use it for identification and small previews, never for whole files.
+    func readEntryData(_ entry: ArchiveEntry, maxBytes: Int) async throws -> Data
+
+    /// What the engine can do with the open archive.
+    func capabilities() async -> ArchiveCapabilities?
+
+    /// A read-only virtual filesystem view over the open archive.
+    func fileSystem() async -> ArchiveFileSystem?
 }
 
 // MARK: - Options
